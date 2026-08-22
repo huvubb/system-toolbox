@@ -18,8 +18,13 @@ Windows 系统维护工具，包含以下功能：
 - DISM 解压 WIM
 - TrustedInstaller 特权操作（需 PsExec64.exe）
 
+- ## vx:forever870422
+- ## 邮箱：810372789@qq.com
+- ## 希望大家踊跃贡献自己的那一份力量！
+- 
 ## 编译
 
 ### MinGW-w64
 ```bash
 g++ -o system-toolbox.exe demo.cpp -std=c++11 -fexec-charset=UTF-8 -finput-charset=UTF-8 -lws2_32 -lshell32 -ladvapi32 -lopengl32 -lgdi32 -luser32 -pthread
+
