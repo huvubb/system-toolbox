@@ -2,11 +2,6 @@
 
 **System Toolbox** —— 免费、开源、全功能的 Windows 系统维护工具
 
-[![C++](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
-[![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6.svg)](https://www.microsoft.com/windows)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-1.0.1-orange.svg)](https://github.com/huvubb/system-toolbox/releases)
-
 ---
 
 ## 📌 简介
