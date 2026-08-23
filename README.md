@@ -49,13 +49,16 @@
 
 前往 [Releases](https://github.com/huvubb/system-toolbox/releases) 下载最新 `system-toolbox.exe`
 
-> **注意**：运行需要管理员权限，部分功能（如 TrustedInstaller）需要同目录下放置 [PsExec64.exe](https://live.sysinternals.com/PsExec64.exe)
+> **注意**：运行需要管理员权限，部分功能（如 TrustedInstaller）需要同目录下放置 [PsExec64.exe]
+(https://live.sysinternals.com/PsExec64.exe)
 
 ### 方式二：从源码编译
 
 #### 编译环境
 - Visual Studio 2019/2022 或 MinGW-w64
 - Windows 10/11 SDK
+
+（兄弟悄悄地诉你，PsExec64.exe在zip里就有，不用下了呢）
 
 #### MinGW-w64 编译命令
 ```bash
