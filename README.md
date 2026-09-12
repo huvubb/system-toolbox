@@ -2,6 +2,11 @@
 
 **System Toolbox** —— 免费、开源、全功能的 Windows 系统维护工具
 
+[![C++](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
+[![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6.svg)](https://www.microsoft.com/windows)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/Version-1.0.1-orange.svg)](https://github.com/huvubb/system-toolbox/releases)
+
 ---
 
 ## 📌 简介
@@ -44,16 +49,13 @@
 
 前往 [Releases](https://github.com/huvubb/system-toolbox/releases) 下载最新 `system-toolbox.exe`
 
-> **注意**：运行需要管理员权限，部分功能（如 TrustedInstaller）需要同目录下放置 [PsExec64.exe]
-(https://live.sysinternals.com/PsExec64.exe)
+> **注意**：运行需要管理员权限，部分功能（如 TrustedInstaller）需要同目录下放置 [PsExec64.exe](https://live.sysinternals.com/PsExec64.exe)
 
 ### 方式二：从源码编译
 
 #### 编译环境
 - Visual Studio 2019/2022 或 MinGW-w64
 - Windows 10/11 SDK
-
-（兄弟悄悄地诉你，PsExec64.exe在zip里就有，不用下了呢）
 
 #### MinGW-w64 编译命令
 ```bash
