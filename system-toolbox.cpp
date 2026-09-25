@@ -4,7 +4,7 @@
 // 运行需要管理员权限，部分操作有风险，使用前请阅读免责声明
 
 // ==================== 版本信息 ====================
-#define TOOLBOX_VERSION    "v1.5"
+#define TOOLBOX_VERSION    "v1.7"
 #define GITHUB_REPO        "huvubb/system-toolbox"
 #define GITHUB_API_URL     "https://api.github.com/repos/huvubb/system-toolbox/releases/latest"
 #define GITHUB_RELEASE_URL "https://github.com/huvubb/system-toolbox/releases"
@@ -258,6 +258,11 @@ void DisableDriverSignature();
 void EnableDriverSignature();
 void DriverToolsMenu();
 
+//chkdsk
+void ChkdskControlMenu();
+void ForceDisableChkdsk();
+void RestoreChkdsk();
+
 // ==================== 在线/离线模式 ====================
 
 bool IsInPeOrRe()
@@ -425,6 +430,7 @@ int main()
             std::cout << "27. 文档格式转换\n";
             std::cout << "28. 哈希工具\n";
             std::cout << "29. 进制转换工具\n";
+            std::cout << "30. 磁盘检查控制（禁止chkdsk）\n";
         }
         else
         {
@@ -457,7 +463,7 @@ int main()
             std::cout << "26. 音视频工具\n";
             std::cout << "27. 文档格式转换\n";
             std::cout << "28. 哈希工具\n";
-            std::cout << "29. 进制转换工具\n";
+             std::cout << "30. 磁盘检查控制（禁止chkdsk）\n";
         }
 
         std::cout << "----------------------------------------\n";
@@ -516,6 +522,7 @@ int main()
             case 27: DocumentConverterMenu(); break;
             case 28: HashToolsMenu(); break;
             case 29: BaseConverterMenu(); break;
+            case 30: ChkdskControlMenu(); break;
 
             case 90:  // 切换模式
                 ToggleMode();
@@ -4209,28 +4216,130 @@ void WimToEsd()
     Pause();
 }
 
-// ESD 转 ISO
+
+// ==================== ESD 转 ISO（先提取再打包） ====================
+
+// 清除 WIM 挂载点
+void CleanupAllWimMounts()
+{
+    std::cout << "\n[清理] 清除所有 WIM 挂载点...\n";
+    system("dism /Cleanup-Wim >nul 2>&1");
+    std::cout << "  ✓ dism /Cleanup-Wim 已执行\n";
+
+    std::string workDir = "C:\\iso_build_work";
+    std::string mountDir = workDir + "\\mount";
+    std::string checkCmd = "dism /Get-MountedWimInfo 2>&1 | findstr /i \"" + mountDir + "\"";
+    if (system(checkCmd.c_str()) == 0)
+    {
+        std::cout << "  [发现残留挂载] 强制卸载...\n";
+        system(("dism /Unmount-Wim /MountDir:\"" + mountDir + "\" /Discard >nul 2>&1").c_str());
+    }
+
+    system(("rmdir /s /q \"" + workDir + "\" >nul 2>&1").c_str());
+    system("dism /Cleanup-Wim >nul 2>&1");
+    std::cout << "  ✓ 清理完成\n";
+}
+
+// 查找 oscdimg
+std::string FindOscdimg()
+{
+    if (system("where oscdimg >nul 2>&1") == 0) return "oscdimg";
+
+    const char* paths[] = {
+        "C:\\Program Files (x86)\\Windows Kits\\10\\Assessment and Deployment Kit\\Deployment Tools\\amd64\\Oscdimg\\oscdimg.exe",
+        "C:\\Program Files\\Windows Kits\\10\\Assessment and Deployment Kit\\Deployment Tools\\amd64\\Oscdimg\\oscdimg.exe",
+        "C:\\Program Files (x86)\\Windows Kits\\10\\Assessment and Deployment Kit\\Deployment Tools\\x86\\Oscdimg\\oscdimg.exe",
+    };
+    for (auto p : paths)
+    {
+        if (GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES)
+            return "\"" + std::string(p) + "\"";
+    }
+
+    std::cout << "\n[提示] 未自动找到 oscdimg.exe\n";
+    std::cout << "请输入完整路径（或留空取消）: ";
+    std::string manual;
+    std::getline(std::cin, manual);
+    if (!manual.empty() && GetFileAttributesA(manual.c_str()) != INVALID_FILE_ATTRIBUTES)
+        return "\"" + manual + "\"";
+    return "";
+}
+
+// 递归复制目录
+bool CopyDirectoryRecursive(const std::string& src, const std::string& dst)
+{
+    CreateDirectoryA(dst.c_str(), nullptr);
+
+    std::string searchPath = src + "\\*";
+    WIN32_FIND_DATAA findData;
+    HANDLE hFind = FindFirstFileA(searchPath.c_str(), &findData);
+
+    if (hFind == INVALID_HANDLE_VALUE) return false;
+
+    do
+    {
+        std::string name = findData.cFileName;
+        if (name == "." || name == "..") continue;
+
+        std::string srcPath = src + "\\" + name;
+        std::string dstPath = dst + "\\" + name;
+
+        if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        {
+            CopyDirectoryRecursive(srcPath, dstPath);
+        }
+        else
+        {
+            CopyFileA(srcPath.c_str(), dstPath.c_str(), FALSE);
+        }
+    } while (FindNextFileA(hFind, &findData));
+
+    FindClose(hFind);
+    return true;
+}
+
+// ESD 转 ISO（先提取，再打包）
 void EsdToIso()
 {
     ClearScreen();
     std::cout << "========== ESD 转 ISO ==========\n";
-    std::cout << "需要 Windows ADK 的 oscdimg.exe\n\n";
+    std::cout << "流程：ESD → WIM → 挂载提取 → 组装目录 → oscdimg\n\n";
+    std::cout << " 1. 生成可启动 ISO（需 boot/efi/sources 完整）\n";
+    std::cout << " 2. 生成数据 ISO（只含 install.wim）\n";
+    std::cout << " 0. 取消\n";
+    int mode = GetIntInput("请选择: ", 2);
+    if (mode == 0) { Pause(); return; }
 
     std::string esdPath = GetInput("ESD 文件路径: ");
     if (esdPath.empty()) { Pause(); return; }
-    std::string isoPath = GetInput("输出 ISO 文件路径: ");
+    std::string isoPath = GetInput("输出 ISO 路径: ");
     if (isoPath.empty()) { Pause(); return; }
 
-    // 工作目录
-    std::string workDir = "C:\\esd_to_iso_work";
-    CreateDirectoryA(workDir.c_str(), nullptr);
+    // 可选：已有的安装源目录（含 boot/efi）
+    std::string bootSource;
+    if (mode == 1)
+    {
+        std::cout << "\n可启动 ISO 需要 boot/efi 目录。\n";
+        std::cout << "请提供已有安装源目录（含 boot/efi/sources），\n";
+        std::cout << "或留空跳过（仅提取 install.wim）。\n";
+        bootSource = GetInput("安装源目录（可空）: ");
+    }
 
-    // 1. ESD → WIM
+    std::string workDir = "C:\\iso_build_work";
+    std::string extractDir = workDir + "\\extract";
+
+    // ==================== 步骤 0：清除挂载点 ====================
+    std::cout << "\n[0/6] 清除旧挂载点...\n";
+    CleanupAllWimMounts();
+    CreateDirectoryA(workDir.c_str(), nullptr);
+    CreateDirectoryA(extractDir.c_str(), nullptr);
+
+    // ==================== 步骤 1：ESD → WIM ====================
     std::string tempWim = workDir + "\\install.wim";
     system(("dism /Get-WimInfo /WimFile:\"" + esdPath + "\"").c_str());
     int index = GetIntInput("索引号（默认1）: ", 1);
 
-    std::cout << "\n[1/3] ESD → WIM...\n";
+    std::cout << "\n[1/6] ESD → WIM...\n";
     system(("dism /Export-Image /SourceImageFile:\"" + esdPath + "\" /SourceIndex:" + std::to_string(index) + " /DestinationImageFile:\"" + tempWim + "\" /Compress:max").c_str());
 
     if (GetFileAttributesA(tempWim.c_str()) == INVALID_FILE_ATTRIBUTES)
@@ -4239,36 +4348,151 @@ void EsdToIso()
         Pause();
         return;
     }
+    std::cout << "  ✓ WIM 已生成\n";
 
-    // 2. 挂载 WIM
+    // ==================== 步骤 2：挂载 WIM ====================
     std::string mountDir = workDir + "\\mount";
     CreateDirectoryA(mountDir.c_str(), nullptr);
 
-    std::cout << "\n[2/3] 挂载 WIM 到 " << mountDir << "...\n";
+    std::cout << "\n[2/6] 挂载 WIM 到 " << mountDir << "...\n";
     system(("dism /Mount-Wim /WimFile:\"" + tempWim + "\" /Index:" + std::to_string(index) + " /MountDir:\"" + mountDir + "\"").c_str());
 
-    // 3. oscdimg 打包
-    std::cout << "\n[3/3] 用 oscdimg 打包 ISO...\n";
-    if (!CheckOscdimg())
+    if (GetFileAttributesA((mountDir + "\\Windows\\System32").c_str()) == INVALID_FILE_ATTRIBUTES)
     {
-        std::cout << "[FAIL] 未找到 oscdimg.exe，请安装 Windows ADK。\n";
-        std::cout << "手动打包命令：\n";
-        std::cout << "oscdimg -m -o -u2 -udfver102 -bootdata:2#p0,e,b" << mountDir << "\\boot\\etfsboot.com#pEF,e,b" << mountDir << "\\efi\\microsoft\\boot\\efisys.bin \"" << mountDir << "\" \"" << isoPath << "\"\n";
+        std::cout << "[FAIL] 挂载失败！\n";
         Pause();
         return;
     }
+    std::cout << "  ✓ WIM 已挂载\n";
 
-    std::string cmd = "oscdimg -m -o -u2 -udfver102 -bootdata:2#p0,e,b\"" + mountDir + "\\boot\\etfsboot.com\"#pEF,e,b\"" + mountDir + "\\efi\\microsoft\\boot\\efisys.bin\" \"" + mountDir + "\" \"" + isoPath + "\"";
+    // ==================== 步骤 3：提取映像到目录 ====================
+    std::cout << "\n[3/6] 提取映像文件到 " << extractDir << "...\n";
+    std::cout << "  （文件较大，请耐心等待）\n";
+
+    // 用 robocopy 复制（比 xcopy 更可靠）
+    std::string robocmd = "robocopy \"" + mountDir + "\" \"" + extractDir + "\" /E /NFL /NDL /NJH /NJS /NC /NS /NP >nul 2>&1";
+    system(robocmd.c_str());
+
+    // 检查关键目录
+    bool hasWindows = GetFileAttributesA((extractDir + "\\Windows\\System32").c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (!hasWindows)
+    {
+        std::cout << "[WARN] robocopy 可能未完全复制，尝试 xcopy...\n";
+        std::string xcopycmd = "xcopy \"" + mountDir + "\\*\" \"" + extractDir + "\\\" /E /H /Y /Q >nul 2>&1";
+        system(xcopycmd.c_str());
+    }
+    std::cout << "  ✓ 提取完成\n";
+
+    // ==================== 步骤 4：卸载 WIM ====================
+    std::cout << "\n[4/6] 卸载 WIM...\n";
+    system(("dism /Unmount-Wim /MountDir:\"" + mountDir + "\" /Discard").c_str());
+    std::cout << "  ✓ 已卸载\n";
+
+    // ==================== 步骤 5：组装可启动 ISO 目录 ====================
+    std::string isoRoot = workDir + "\\iso_root";
+    CreateDirectoryA(isoRoot.c_str(), nullptr);
+
+    if (mode == 1 && !bootSource.empty())
+    {
+        std::cout << "\n[5/6] 组装可启动 ISO 目录...\n";
+
+        // 复制 boot/efi/sources 等引导文件
+        std::cout << "  复制引导文件...\n";
+        std::string bootDirs[] = { "boot", "efi", "bootmgr", "bootmgr.efi", "setup.exe", "autorun.inf" };
+        for (auto& d : bootDirs)
+        {
+            std::string srcPath = bootSource + "\\" + d;
+            std::string dstPath = isoRoot + "\\" + d;
+            if (GetFileAttributesA(srcPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+            {
+                DWORD attr = GetFileAttributesA(srcPath.c_str());
+                if (attr & FILE_ATTRIBUTE_DIRECTORY)
+                {
+                    CopyDirectoryRecursive(srcPath, dstPath);
+                }
+                else
+                {
+                    CopyFileA(srcPath.c_str(), dstPath.c_str(), FALSE);
+                }
+            }
+        }
+
+        // 复制提取的 install.wim
+        std::cout << "  复制 install.wim...\n";
+        CreateDirectoryA((isoRoot + "\\sources").c_str(), nullptr);
+        CopyFileA(tempWim.c_str(), (isoRoot + "\\sources\\install.wim").c_str(), FALSE);
+
+        // 复制 boot.wim（如果有）
+        std::string srcBootWim = bootSource + "\\sources\\boot.wim";
+        if (GetFileAttributesA(srcBootWim.c_str()) != INVALID_FILE_ATTRIBUTES)
+        {
+            CopyFileA(srcBootWim.c_str(), (isoRoot + "\\sources\\boot.wim").c_str(), FALSE);
+        }
+
+        std::cout << "  ✓ 目录组装完成\n";
+    }
+    else if (mode == 1 && bootSource.empty())
+    {
+        // 只提取 install.wim 的目录结构
+        std::cout << "\n[5/6] 未提供安装源，仅复制提取内容...\n";
+        CopyDirectoryRecursive(extractDir, isoRoot);
+    }
+    else
+    {
+        // 数据 ISO：只放 install.wim
+        std::cout << "\n[5/6] 数据 ISO：复制 install.wim...\n";
+        CreateDirectoryA((isoRoot + "\\sources").c_str(), nullptr);
+        CopyFileA(tempWim.c_str(), (isoRoot + "\\sources\\install.wim").c_str(), FALSE);
+        std::cout << "  ✓ 完成\n";
+    }
+
+    // ==================== 步骤 6：打包 ISO ====================
+    std::cout << "\n[6/6] 用 oscdimg 打包 ISO...\n";
+
+    std::string oscdimg = FindOscdimg();
+    if (oscdimg.empty()) { Pause(); return; }
+
+    std::string cmd;
+    std::string etfsboot = isoRoot + "\\boot\\etfsboot.com";
+    std::string efisys = isoRoot + "\\efi\\microsoft\\boot\\efisys.bin";
+    bool hasBios = GetFileAttributesA(etfsboot.c_str()) != INVALID_FILE_ATTRIBUTES;
+    bool hasUefi = GetFileAttributesA(efisys.c_str()) != INVALID_FILE_ATTRIBUTES;
+
+    if (mode == 1 && hasBios && hasUefi)
+    {
+        std::cout << "  引导: BIOS + UEFI\n";
+        cmd = oscdimg + " -m -o -u2 -udfver102 -bootdata:2#p0,e,b\"" + etfsboot + "\"#pEF,e,b\"" + efisys + "\" \"" + isoRoot + "\" \"" + isoPath + "\"";
+    }
+    else if (mode == 1 && hasBios)
+    {
+        std::cout << "  引导: BIOS\n";
+        cmd = oscdimg + " -m -o -u2 -udfver102 -b\"" + etfsboot + "\" \"" + isoRoot + "\" \"" + isoPath + "\"";
+    }
+    else if (mode == 1 && hasUefi)
+    {
+        std::cout << "  引导: UEFI\n";
+        cmd = oscdimg + " -m -o -u2 -udfver102 -bootdata:1#pEF,e,b\"" + efisys + "\" \"" + isoRoot + "\" \"" + isoPath + "\"";
+    }
+    else
+    {
+        std::cout << "  数据 ISO（不可启动）\n";
+        cmd = oscdimg + " -m -o -u2 -udfver102 \"" + isoRoot + "\" \"" + isoPath + "\"";
+    }
+
+    std::cout << "\n执行命令:\n" << cmd << "\n\n";
     system(cmd.c_str());
 
-    // 4. 卸载 WIM
-    std::cout << "\n[清理] 卸载 WIM...\n";
-    system(("dism /Unmount-Wim /MountDir:\"" + mountDir + "\" /Discard").c_str());
-
+    // ==================== 结果 ====================
     if (GetFileAttributesA(isoPath.c_str()) != INVALID_FILE_ATTRIBUTES)
     {
+        LARGE_INTEGER size;
+        HANDLE h = CreateFileA(isoPath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        if (h != INVALID_HANDLE_VALUE) { GetFileSizeEx(h, &size); CloseHandle(h); }
+        else size.QuadPart = 0;
+
         std::cout << "\n[OK] ISO 已生成: " << isoPath << std::endl;
-        std::cout << "工作目录: " << workDir << "（可手动清理）\n";
+        std::cout << "     大小: " << (size.QuadPart / (1024.0 * 1024.0)) << " MB\n";
+        std::cout << "     工作目录: " << workDir << "（可手动清理）\n";
     }
     else
     {
@@ -9989,3 +10213,388 @@ void BaseConverterMenu()
     }
 }
 
+// ==================== 强行禁止 chkdsk ====================
+
+// 强行终止 chkdsk 进程
+void KillChkdskProcesses()
+{
+    std::cout << "\n[1/6] 强行终止 chkdsk 进程...\n";
+    system("taskkill /f /im chkdsk.exe >nul 2>&1");
+    system("taskkill /f /im autochk.exe >nul 2>&1");
+    system("taskkill /f /im chkntfs.exe >nul 2>&1");
+    std::cout << "  ✓ chkdsk.exe / autochk.exe / chkntfs.exe 已终止\n";
+}
+
+// 取消指定卷的 dirty bit
+void ClearDirtyBitForDrive(const std::string& drive)
+{
+    std::cout << "\n[2/6] 取消 " << drive << " 的 dirty bit...\n";
+
+    std::string queryCmd = "fsutil dirty query " + drive + " >nul 2>&1";
+    if (system(queryCmd.c_str()) == 0)
+    {
+        std::string chkntfsCmd = "chkntfs /x " + drive + " >nul 2>&1";
+        system(chkntfsCmd.c_str());
+        std::cout << "  ✓ " << drive << " 已从检查列表移除\n";
+    }
+    else
+    {
+        std::cout << "  [跳过] " << drive << " 无法查询 dirty 状态\n";
+    }
+}
+
+// 取消指定卷的 chkntfs 计划检查
+void DisableChkntfsForDrive(const std::string& drive)
+{
+    std::cout << "\n[3/6] 取消 " << drive << " 的计划检查...\n";
+    std::string cmd = "chkntfs /x " + drive + " >nul 2>&1";
+    system(cmd.c_str());
+    std::cout << "  ✓ " << drive << " 已取消\n";
+}
+
+// 清空 BootExecute
+void ClearBootExecute()
+{
+    std::cout << "\n[4/6] 清空 BootExecute 开机检查...\n";
+
+    std::string cmd = "reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\" /v BootExecute /t REG_MULTI_SZ /d \"\" /f";
+    int ret = system(cmd.c_str());
+
+    if (ret == 0)
+        std::cout << "  ✓ BootExecute 已清空\n";
+    else
+        std::cout << "  ✗ BootExecute 清空失败\n";
+}
+
+// 禁止 NTFS 自动校验
+void DisableNtfsSelfHeal()
+{
+    std::cout << "\n[5/6] 禁止文件系统自动校验...\n";
+
+    system("reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\" /v NtfsDisableLastAccessUpdate /t REG_DWORD /d 1 /f >nul 2>&1");
+    system("reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\" /v NtfsDisableSelfHeal /t REG_DWORD /d 1 /f >nul 2>&1");
+    system("reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\" /v NtfsDisableVolsnapDiag /t REG_DWORD /d 1 /f >nul 2>&1");
+
+    std::cout << "  ✓ 已禁止 NTFS 自愈\n";
+    std::cout << "  ✓ 已禁止损坏自动触发 chkdsk\n";
+}
+
+// 禁止指定卷的自动校验
+void DisableVolumeAutoCheckForDrive(const std::string& drive)
+{
+    std::cout << "\n[6/6] 禁止 " << drive << " 的挂载校验...\n";
+
+    std::string cmd1 = "fsutil repair set " + drive + " 0 >nul 2>&1";
+    system(cmd1.c_str());
+
+    std::string cmd3 = "chkntfs /x " + drive + " >nul 2>&1";
+    system(cmd3.c_str());
+
+    std::cout << "  ✓ " << drive << " 已禁止挂载校验和自愈\n";
+}
+
+// 禁用 WinRE 自动修复
+void DisableWinREAutoRepair()
+{
+    std::cout << "\n[附加] 禁用 WinRE 自动修复...\n";
+    system("reagentc /disable >nul 2>&1");
+    system("bcdedit /set recoveryenabled No >nul 2>&1");
+    system("bcdedit /set {default} bootstatuspolicy ignoreallfailures >nul 2>&1");
+    std::cout << "  ✓ WinRE 自动修复已禁用\n";
+}
+
+// 获取所有可用磁盘列表
+void ShowAvailableDrives()
+{
+    std::cout << "\n可用磁盘：\n";
+    DWORD drives = GetLogicalDrives();
+    for (char c = 'A'; c <= 'Z'; c++)
+    {
+        if (drives & (1 << (c - 'A')))
+        {
+            std::string root = std::string(1, c) + ":\\";
+            UINT type = GetDriveTypeA(root.c_str());
+            const char* typeStr = "未知";
+            switch (type)
+            {
+                case DRIVE_FIXED: typeStr = "本地磁盘"; break;
+                case DRIVE_REMOVABLE: typeStr = "可移动"; break;
+                case DRIVE_CDROM: typeStr = "光驱"; break;
+                case DRIVE_REMOTE: typeStr = "网络"; break;
+                case DRIVE_RAMDISK: typeStr = "RAM"; break;
+            }
+            std::cout << "  " << c << ":  " << typeStr << "\n";
+        }
+    }
+}
+
+// 主函数：强行禁止 chkdsk（支持选择磁盘）
+void ForceDisableChkdsk()
+{
+    ClearScreen();
+    std::cout << "╔════════════════════════════════════════════════╗\n";
+    std::cout << "║      ⚠️  强行禁止 chkdsk / 磁盘校验  ⚠️         ║\n";
+    std::cout << "╚════════════════════════════════════════════════╝\n\n";
+
+    // 显示磁盘
+    ShowAvailableDrives();
+    std::cout << "\n";
+
+    std::cout << "请选择操作范围：\n";
+    std::cout << " 1. 指定单个磁盘\n";
+    std::cout << " 2. 指定多个磁盘（用逗号分隔）\n";
+    std::cout << " 3. 所有磁盘\n";
+    std::cout << " 0. 取消\n";
+    int range = GetIntInput("请选择: ");
+
+    if (range == 0) { Pause(); return; }
+
+    std::vector<std::string> targets;
+
+    if (range == 1)
+    {
+        std::string d = GetInput("请输入盘符（如 C）: ");
+        if (d.empty()) { Pause(); return; }
+        if (d.back() != ':') d += ":";
+        targets.push_back(d);
+    }
+    else if (range == 2)
+    {
+        std::string input = GetInput("请输入盘符列表（如 C,D,E）: ");
+        std::stringstream ss(input);
+        std::string seg;
+        while (std::getline(ss, seg, ','))
+        {
+            // 去空格
+            while (!seg.empty() && seg.front() == ' ') seg.erase(seg.begin());
+            while (!seg.empty() && seg.back() == ' ') seg.pop_back();
+            if (!seg.empty())
+            {
+                if (seg.back() != ':') seg += ":";
+                targets.push_back(seg);
+            }
+        }
+    }
+    else if (range == 3)
+    {
+        DWORD drives = GetLogicalDrives();
+        for (char c = 'A'; c <= 'Z'; c++)
+        {
+            if (drives & (1 << (c - 'A')))
+            {
+                targets.push_back(std::string(1, c) + ":");
+            }
+        }
+    }
+
+    if (targets.empty()) { std::cout << "未选择任何磁盘。\n"; Pause(); return; }
+
+    // ==================== 免责声明 ====================
+    ClearScreen();
+    std::cout << "╔════════════════════════════════════════════════╗\n";
+    std::cout << "║          ⚠️  危险操作警告  ⚠️                  ║\n";
+    std::cout << "╚════════════════════════════════════════════════╝\n\n";
+
+    std::cout << "将对以下磁盘禁止检查：\n";
+    for (const auto& t : targets)
+        std::cout << "  " << t << "\n";
+    std::cout << "\n";
+
+    std::cout << "【免责声明】\n";
+    std::cout << "- 磁盘可能存在未修复的错误，强行禁止可能导致数据丢失。\n";
+    std::cout << "- 系统文件损坏时，开机检查是重要的自修复机制。\n";
+    std::cout << "- 此操作后系统将不再自动检查磁盘。\n";
+    std::cout << "- 作者不对使用本功能造成的任何损失负责。\n\n";
+
+    std::cout << "════════════════════════════════════════════════\n";
+    std::cout << "输入 DISABLE（大写）确认执行: ";
+
+    std::string confirm;
+    std::getline(std::cin, confirm);
+
+    if (confirm != "DISABLE")
+    {
+        std::cout << "\n[已取消] 操作终止。\n";
+        Pause();
+        return;
+    }
+
+    // ==================== 执行 ====================
+    std::cout << "\n[执行] 开始强行禁止 chkdsk...\n";
+
+    KillChkdskProcesses();
+
+    for (const auto& d : targets)
+    {
+        ClearDirtyBitForDrive(d);
+        DisableChkntfsForDrive(d);
+        DisableVolumeAutoCheckForDrive(d);
+    }
+
+    ClearBootExecute();
+    DisableNtfsSelfHeal();
+    DisableWinREAutoRepair();
+
+    std::cout << "\n════════════════════════════════════════════════\n";
+    std::cout << "  ✓ 所有操作已完成。\n";
+    std::cout << "  ✓ 重启后不会再触发磁盘检查。\n";
+    std::cout << "════════════════════════════════════════════════\n";
+
+    Pause();
+}
+
+// 恢复开机检查（支持选择磁盘）
+void RestoreChkdsk()
+{
+    ClearScreen();
+    std::cout << "========== 恢复开机磁盘检查 ==========\n";
+
+    ShowAvailableDrives();
+    std::cout << "\n";
+
+    std::cout << " 1. 指定单个磁盘\n";
+    std::cout << " 2. 指定多个磁盘\n";
+    std::cout << " 3. 所有磁盘\n";
+    std::cout << " 0. 取消\n";
+    int range = GetIntInput("请选择: ");
+
+    if (range == 0) { Pause(); return; }
+
+    std::vector<std::string> targets;
+
+    if (range == 1)
+    {
+        std::string d = GetInput("盘符（如 C）: ");
+        if (!d.empty()) { if (d.back() != ':') d += ":"; targets.push_back(d); }
+    }
+    else if (range == 2)
+    {
+        std::string input = GetInput("盘符列表（如 C,D,E）: ");
+        std::stringstream ss(input);
+        std::string seg;
+        while (std::getline(ss, seg, ','))
+        {
+            while (!seg.empty() && seg.front() == ' ') seg.erase(seg.begin());
+            while (!seg.empty() && seg.back() == ' ') seg.pop_back();
+            if (!seg.empty()) { if (seg.back() != ':') seg += ":"; targets.push_back(seg); }
+        }
+    }
+    else if (range == 3)
+    {
+        DWORD drives = GetLogicalDrives();
+        for (char c = 'A'; c <= 'Z'; c++)
+            if (drives & (1 << (c - 'A'))) targets.push_back(std::string(1, c) + ":");
+    }
+
+    if (targets.empty()) { std::cout << "未选择任何磁盘。\n"; Pause(); return; }
+
+    // 恢复 BootExecute
+    std::cout << "\n[1/3] 恢复 BootExecute...\n";
+    system("reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\" /v BootExecute /t REG_MULTI_SZ /d \"autocheck autochk *\" /f >nul 2>&1");
+    std::cout << "  ✓ 已恢复\n";
+
+    // 恢复指定磁盘
+    std::cout << "\n[2/3] 恢复 chkntfs 自动检查...\n";
+    for (const auto& d : targets)
+    {
+        std::string cmd = "chkntfs /c " + d + " >nul 2>&1";
+        system(cmd.c_str());
+        std::cout << "  ✓ " << d << " 已恢复\n";
+    }
+
+    // 恢复 NTFS 自愈
+    std::cout << "\n[3/3] 恢复 NTFS 自愈...\n";
+    system("reg delete \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\" /v NtfsDisableSelfHeal /f >nul 2>&1");
+    system("reg delete \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\" /v NtfsDisableVolsnapDiag /f >nul 2>&1");
+    system("reagentc /enable >nul 2>&1");
+    system("bcdedit /set recoveryenabled Yes >nul 2>&1");
+    system("bcdedit /set {default} bootstatuspolicy displayallfailures >nul 2>&1");
+    std::cout << "  ✓ 已恢复\n";
+
+    std::cout << "\n════════════════════════════════════════════════\n";
+    std::cout << "  ✓ 恢复完成。\n";
+    std::cout << "════════════════════════════════════════════════\n";
+
+    Pause();
+}
+
+// 查看指定磁盘的 chkdsk 状态
+void ShowChkdskStatus()
+{
+    ClearScreen();
+    std::cout << "========== chkdsk 状态查询 ==========\n";
+
+    ShowAvailableDrives();
+    std::cout << "\n";
+
+    std::string input = GetInput("要查询的盘符（多个用逗号分隔，空=全部）: ");
+
+    std::vector<std::string> targets;
+    if (input.empty())
+    {
+        DWORD drives = GetLogicalDrives();
+        for (char c = 'A'; c <= 'Z'; c++)
+            if (drives & (1 << (c - 'A'))) targets.push_back(std::string(1, c) + ":");
+    }
+    else
+    {
+        std::stringstream ss(input);
+        std::string seg;
+        while (std::getline(ss, seg, ','))
+        {
+            while (!seg.empty() && seg.front() == ' ') seg.erase(seg.begin());
+            while (!seg.empty() && seg.back() == ' ') seg.pop_back();
+            if (!seg.empty()) { if (seg.back() != ':') seg += ":"; targets.push_back(seg); }
+        }
+    }
+
+    ClearScreen();
+    std::cout << "========== chkdsk 状态 ==========\n\n";
+
+    std::cout << "=== 全局配置 ===\n";
+    std::cout << "BootExecute:\n";
+    system("reg query \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\" /v BootExecute");
+    std::cout << "\nNTFS 自愈:\n";
+    system("reg query \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\" /v NtfsDisableSelfHeal 2>&1");
+
+    std::cout << "\n=== 各磁盘状态 ===\n";
+    for (const auto& d : targets)
+    {
+        std::cout << "\n--- " << d << " ---\n";
+        std::cout << "dirty 状态: ";
+        system(("fsutil dirty query " + d + " 2>&1").c_str());
+        std::cout << "计划检查: ";
+        system(("chkntfs " + d + " 2>&1").c_str());
+    }
+
+    Pause();
+}
+
+// 菜单
+void ChkdskControlMenu()
+{
+    while (true)
+    {
+        ClearScreen();
+        std::cout << "========== 磁盘检查控制 ==========\n";
+        std::cout << " 1. 强行禁止 chkdsk / 磁盘校验\n";
+        std::cout << " 2. 恢复开机检查\n";
+        std::cout << " 3. 查看 chkdsk 状态\n";
+        std::cout << " 0. 返回上级菜单\n";
+        std::cout << "==================================\n";
+
+        int choice = GetIntInput("请选择: ");
+
+        if (choice == 0) break;
+
+        switch (choice)
+        {
+            case 1: ForceDisableChkdsk(); break;
+            case 2: RestoreChkdsk(); break;
+            case 3: ShowChkdskStatus(); break;
+            default:
+                std::cout << "无效选项。" << std::endl;
+                Pause();
+        }
+    }
+}
