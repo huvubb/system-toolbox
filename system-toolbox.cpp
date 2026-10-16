@@ -4,22 +4,24 @@
 // 运行需要管理员权限，部分操作有风险，使用前请阅读免责声明
 
 // ==================== 版本信息 ====================
-#define TOOLBOX_VERSION    "v1.7"
-#define GITHUB_REPO        "huvubb/system-toolbox"
-#define GITHUB_API_URL     "https://api.github.com/repos/huvubb/system-toolbox/releases/latest"
+#define TOOLBOX_VERSION "v1.7"
+#define GITHUB_REPO "huvubb/system-toolbox"
+#define GITHUB_API_URL "https://api.github.com/repos/huvubb/system-toolbox/releases/latest"
 #define GITHUB_RELEASE_URL "https://github.com/huvubb/system-toolbox/releases"
-#define ENV_LAST_HASH "TOOLBOX_LAST_HASH"
 
 // ==================== 全局变量 ====================
-bool g_bOnlineMode = true;       // true=在线模式，false=离线模式
+bool g_bOnlineMode = true; // true=在线模式，false=离线模式
 bool g_bModeInitialized = false;
 
 #define _CRT_SECURE_NO_WARNINGS
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <winsock2.h>
 #include <iostream>
-#include <ctime>   // 用于 srand
-#include <objbase.h>  // 用于 CoCreateGuid
-#pragma comment(lib, "ole32.lib")  // 链接 ole32
+#include <ctime>                  // 用于 srand
+#include <objbase.h>              // 用于 CoCreateGuid
+#pragma comment(lib, "ole32.lib") // 链接 ole32
 #include <string>
 #include <vector>
 #include <cstdlib>
@@ -29,8 +31,12 @@ bool g_bModeInitialized = false;
 #include <iomanip>
 #include <cstdio>
 #include <windows.h>
-#include <d3d11.h>       // 添加
-#include <dxgi.h>        // 添加
+#include <winternl.h>
+#include <wincrypt.h>
+#include <filesystem>
+#include <limits>
+#include <d3d11.h> // 添加
+#include <dxgi.h>  // 添加
 #include <shellapi.h>
 #include <conio.h>
 #include <fstream>
@@ -43,10 +49,12 @@ bool g_bModeInitialized = false;
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "opengl32.lib")
 #pragma comment(lib, "ws2_32.lib")
-#pragma comment(lib, "d3d11.lib")   // 添加
-#pragma comment(lib, "dxgi.lib")    // 添加
+#pragma comment(lib, "d3d11.lib") // 添加
+#pragma comment(lib, "dxgi.lib")  // 添加
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "crypt32.lib")
 
 // ====================================================================
 // 基础工具函数
@@ -168,8 +176,6 @@ std::string GetLocalExeHash();
 std::string GetRemoteExeHash(const std::string& zipPath);
 bool CheckJustUpdated();
 void ShowUpdateContent();
-std::string GetLastHash();
-void SaveCurrentHash(const std::string& hash);
 
 // 软件与运行库
 void InstallRuntimes();
@@ -331,42 +337,64 @@ LRESULT CALLBACK GPUStressWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
 }
 
 // 获取用户输入的整数
-int GetIntInput(const std::string& prompt, int defaultVal)
+int GetIntInput(const std::string &prompt, int defaultVal)
 {
     std::string input = GetInput(prompt);
     if (input.empty() && defaultVal != -1)
         return defaultVal;
-    try { return std::stoi(input); }
-    catch (...) { return -1; }
+    try
+    {
+        size_t end = 0;
+        int value = std::stoi(input, &end);
+        return input.find_first_not_of(" \t\r\n", end) == std::string::npos ? value : -1;
+    }
+    catch (...)
+    {
+        return -1;
+    }
 }
 
 // 计算文件 SHA256
-std::string GetFileSHA256(const std::string& filePath)
+std::string GetFileSHA256(const std::string &filePath)
 {
-    std::string result;
-    std::string tempHash = "C:\\hash_temp.txt";
-    DeleteFileA(tempHash.c_str());
+    std::ifstream file(std::filesystem::u8path(filePath), std::ios::binary);
+    if (!file)
+        return "";
 
-    std::string cmd = "powershell -Command \""
-        "$ProgressPreference='SilentlyContinue';"
-        "(Get-FileHash -Path '" + filePath + "' -Algorithm SHA256).Hash"
-        " | Out-File -FilePath '" + tempHash + "' -Encoding ASCII\"";
-    system(cmd.c_str());
-
-    std::ifstream f(tempHash);
-    if (f.is_open())
+    HCRYPTPROV provider = 0;
+    HCRYPTHASH hash = 0;
+    if (!CryptAcquireContextW(&provider, nullptr, nullptr, PROV_RSA_AES, CRYPT_VERIFYCONTEXT))
+        return "";
+    if (!CryptCreateHash(provider, CALG_SHA_256, 0, 0, &hash))
     {
-        std::getline(f, result);
-        f.close();
+        CryptReleaseContext(provider, 0);
+        return "";
     }
-    DeleteFileA(tempHash.c_str());
 
-    while (!result.empty() && (result.front() == ' ' || result.front() == '\r' || result.front() == '\n'))
-        result.erase(result.begin());
-    while (!result.empty() && (result.back() == ' ' || result.back() == '\r' || result.back() == '\n'))
-        result.pop_back();
+    bool ok = true;
+    char buffer[65536];
+    while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0)
+    {
+        if (!CryptHashData(hash, reinterpret_cast<const BYTE *>(buffer),
+                           static_cast<DWORD>(file.gcount()), 0))
+        {
+            ok = false;
+            break;
+        }
+    }
+    BYTE digest[32];
+    DWORD size = sizeof(digest);
+    ok = ok && !file.bad() && CryptGetHashParam(hash, HP_HASHVAL, digest, &size, 0);
+    CryptDestroyHash(hash);
+    CryptReleaseContext(provider, 0);
+    if (!ok || size != sizeof(digest))
+        return "";
 
-    return result;
+    std::ostringstream result;
+    result << std::hex << std::uppercase << std::setfill('0');
+    for (BYTE byte : digest)
+        result << std::setw(2) << static_cast<unsigned int>(byte);
+    return result.str();
 }
 int main()
 {
@@ -463,6 +491,7 @@ int main()
             std::cout << "26. 音视频工具\n";
             std::cout << "27. 文档格式转换\n";
             std::cout << "28. 哈希工具\n";
+            std::cout << "29. 进制转换工具\n";
              std::cout << "30. 磁盘检查控制（禁止chkdsk）\n";
         }
 
@@ -470,10 +499,9 @@ int main()
         std::cout << "90. 切换在线/离线模式\n";
         std::cout << " 0. 退出程序\n";
         std::cout << "========================================\n";
-        std::cout << "请输入选项: ";
-
-        std::cin >> choice;
-        std::cin.ignore();
+        choice = GetIntInput("请输入选项: ");
+        if (!std::cin)
+            return 0;
 
         // 离线模式下，拦截网络相关功能
         if (!g_bOnlineMode)
@@ -927,7 +955,7 @@ void DetectFakeDisk()
     if (c != 'y' && c != 'Y') { std::cout << "操作已取消。" << std::endl; Pause(); return; }
 
     const size_t blockSize = 1024 * 1024;
-    std::vector<char> buffer(blockSize, 0xAA);
+    std::vector<char> buffer(blockSize, static_cast<char>(0xAA));
     unsigned long long totalWritten = 0;
     int fileIndex = 0;
     std::vector<std::string> testFiles;
@@ -955,7 +983,7 @@ void DetectFakeDisk()
     std::cout << "正在校验数据完整性...\n";
     bool allOk = true;
     std::vector<char> readBuf(blockSize);
-    std::vector<char> expected(blockSize, 0xAA);
+    std::vector<char> expected(blockSize, static_cast<char>(0xAA));
 
     for (const auto& fileName : testFiles)
     {
@@ -1837,7 +1865,7 @@ void NetworkStressTest()
 
     std::cout << "连接建立，开始传输数据...\n";
     const int bufferSize = 1024 * 1024; // 1MB
-    std::vector<char> buffer(bufferSize, 0xAB);
+    std::vector<char> buffer(bufferSize, static_cast<char>(0xAB));
     std::atomic<bool> stop{false};
     std::atomic<unsigned long long> totalBytes{0};
 
@@ -1923,7 +1951,7 @@ void InterfaceStressTest()
     std::string fileName = drive + "\\__interface_test.tmp";
     const size_t blockSize = 1024 * 1024;
     size_t totalBlocks = static_cast<size_t>(testSizeMB);
-    std::vector<char> writeBuffer(blockSize, 0xC3);
+    std::vector<char> writeBuffer(blockSize, static_cast<char>(0xC3));
     std::vector<char> readBuffer(blockSize);
 
     auto startWrite = std::chrono::steady_clock::now();
@@ -6688,12 +6716,15 @@ void CompileToolsMenu()
         };
         
         // UTF-8 转宽字符
-        auto Utf8ToWide = [](const std::string& str) -> std::wstring
+        auto Utf8ToWide = [](const std::string &str) -> std::wstring
         {
-            if (str.empty()) return L"";
+            if (str.empty())
+                return L"";
             int len = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
             std::wstring result(len, L'\0');
             MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &result[0], len);
+            if (!result.empty())
+                result.pop_back();
             return result;
         };
         
@@ -6748,132 +6779,118 @@ void CompileToolsMenu()
                 Pause();
                 break;
             }
-case 7:
-{
-    RunCmd("pip install pyinstaller");
-    std::cout << "Python 文件路径: ";
-    std::string pyFile = GetInput("");
-
-    if (pyFile.empty())
-    {
-        std::cout << "路径不能为空！" << std::endl;
-        Pause();
-        break;
-    }
-
-    // 去除引号
-    while (!pyFile.empty() && (pyFile.front() == '"' || pyFile.front() == '\'')) pyFile.erase(pyFile.begin());
-    while (!pyFile.empty() && (pyFile.back() == '"' || pyFile.back() == '\'')) pyFile.pop_back();
-
-    // 提取源文件目录、文件名
-    std::string sourceDir;
-    size_t lastSlash = pyFile.find_last_of("\\/");
-    if (lastSlash != std::string::npos)
-        sourceDir = pyFile.substr(0, lastSlash);
-    else
-        sourceDir = ".";
-
-    std::string baseName = pyFile;
-    if (lastSlash != std::string::npos)
-        baseName = pyFile.substr(lastSlash + 1);
-    size_t lastDot = baseName.find_last_of('.');
-    if (lastDot != std::string::npos)
-        baseName = baseName.substr(0, lastDot);
-
-    std::string exeName = baseName + ".exe";
-
-    // 宽字符转换
-    std::wstring wPyFile = Utf8ToWide(pyFile);
-    std::wstring wBuildDir = Utf8ToWide(buildDir);
-    std::wstring wDistDir = Utf8ToWide(distDir);
-    std::wstring wSpecDir = Utf8ToWide(specDir);
-
-    // 构建命令
-    std::wstring cmdLine = L"pyinstaller --onefile --clean";
-    cmdLine += L" --distpath \"" + wDistDir + L"\"";
-    cmdLine += L" --workpath \"" + wBuildDir + L"\"";
-    cmdLine += L" --specpath \"" + wSpecDir + L"\"";
-    cmdLine += L" \"" + wPyFile + L"\"";
-
-    std::wcout << L">> " << cmdLine << std::endl;
-
-    // 执行
-    STARTUPINFOW si = { sizeof(si) };
-    PROCESS_INFORMATION pi;
-    std::vector<wchar_t> cmdBuffer(cmdLine.begin(), cmdLine.end());
-    cmdBuffer.push_back(L'\0');
-
-    if (CreateProcessW(nullptr, cmdBuffer.data(),
-        nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
-    {
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-    }
-
-    // 定义源 exe 和目标 exe 路径（必须在 if 之前）
-    std::string srcExe = distDir + "\\" + exeName;
-    std::string destExe = sourceDir + "\\" + exeName;
-
-    // 如果目标已存在，先尝试删除
-    if (GetFileAttributesA(destExe.c_str()) != INVALID_FILE_ATTRIBUTES)
-    {
-        std::string killCmd = "taskkill /f /im \"" + exeName + "\" >nul 2>&1";
-        system(killCmd.c_str());   // ← 用 .c_str()
-        Sleep(500);
-        DeleteFileA(destExe.c_str());
-    }
-
-    // ==================== 迁移 exe 回源文件目录 ====================
-
-    // 如果目标已存在，先尝试删除
-    if (GetFileAttributesA(destExe.c_str()) != INVALID_FILE_ATTRIBUTES)
-    {
-        std::string killCmd = "taskkill /f /im \"" + exeName + "\" >nul 2>&1";
-        system(killCmd.c_str());
-        Sleep(500);
-        DeleteFileA(destExe.c_str());
-    }
-
-    // 检查源 exe 是否存在
-    DWORD attr = GetFileAttributesA(srcExe.c_str());
-    if (attr == INVALID_FILE_ATTRIBUTES)
-    {
-        std::cout << "\n未找到打包后的 exe: " << srcExe << std::endl;
-        Pause();
-        break;
-    }
-
-    // 尝试迁移
-    if (MoveFileA(srcExe.c_str(), destExe.c_str()))
-    {
-        std::cout << "\n[OK] exe 已迁移到: " << destExe << std::endl;
-    }
-    else
-    {
-        if (CopyFileA(srcExe.c_str(), destExe.c_str(), FALSE))
+        case 7:
         {
-            DeleteFileA(srcExe.c_str());
-            std::cout << "\n[OK] exe 已复制到: " << destExe << std::endl;
-        }
-        else
-        {
-            std::cout << "\n[FAIL] 迁移失败！" << std::endl;
-            std::cout << "源: " << srcExe << std::endl;
-            std::cout << "目标: " << destExe << std::endl;
-        }
-    }
+            RunCmd("pip install pyinstaller");
+            std::cout << "Python 文件路径: ";
+            std::string pyFile = GetInput("");
 
-    // 清理缓存
-    std::string cleanBuild = "rmdir /s /q \"" + buildDir + "\" >nul 2>&1";
-    system(cleanBuild.c_str());
-    std::string cleanSpec = "rmdir /s /q \"" + specDir + "\" >nul 2>&1";
-    system(cleanSpec.c_str());
+            if (pyFile.empty())
+            {
+                std::cout << "路径不能为空！" << std::endl;
+                Pause();
+                break;
+            }
 
-    std::cout << "\n打包完成。" << std::endl;
-    Pause();
-    break;
-}   // ← 这个右大括号必须有！
+            // 去除引号
+            while (!pyFile.empty() && (pyFile.front() == '"' || pyFile.front() == '\''))
+                pyFile.erase(pyFile.begin());
+            while (!pyFile.empty() && (pyFile.back() == '"' || pyFile.back() == '\''))
+                pyFile.pop_back();
+
+            // 提取源文件目录、文件名
+            std::string sourceDir;
+            size_t lastSlash = pyFile.find_last_of("\\/");
+            if (lastSlash != std::string::npos)
+                sourceDir = pyFile.substr(0, lastSlash);
+            else
+                sourceDir = ".";
+
+            std::string baseName = pyFile;
+            if (lastSlash != std::string::npos)
+                baseName = pyFile.substr(lastSlash + 1);
+            size_t lastDot = baseName.find_last_of('.');
+            if (lastDot != std::string::npos)
+                baseName = baseName.substr(0, lastDot);
+
+            std::string exeName = baseName + ".exe";
+
+            // 宽字符转换
+            std::wstring wPyFile = Utf8ToWide(pyFile);
+            std::wstring wBuildDir = Utf8ToWide(buildDir);
+            std::wstring wDistDir = Utf8ToWide(distDir);
+            std::wstring wSpecDir = Utf8ToWide(specDir);
+
+            // 构建命令
+            std::wstring cmdLine = L"pyinstaller --onefile --clean";
+            cmdLine += L" --distpath \"" + wDistDir + L"\"";
+            cmdLine += L" --workpath \"" + wBuildDir + L"\"";
+            cmdLine += L" --specpath \"" + wSpecDir + L"\"";
+            cmdLine += L" \"" + wPyFile + L"\"";
+
+            std::wcout << L">> " << cmdLine << std::endl;
+
+            STARTUPINFOW si = {};
+            si.cb = sizeof(si);
+            PROCESS_INFORMATION pi = {};
+            std::vector<wchar_t> cmdBuffer(cmdLine.begin(), cmdLine.end());
+            cmdBuffer.push_back(L'\0');
+            if (!CreateProcessW(nullptr, cmdBuffer.data(), nullptr, nullptr, FALSE,
+                                0, nullptr, nullptr, &si, &pi))
+            {
+                std::cout << "无法启动打包程序，错误码: " << GetLastError() << "\n";
+                Pause();
+                break;
+            }
+            DWORD buildExit = 1;
+            DWORD waitResult = WaitForSingleObject(pi.hProcess, INFINITE);
+            BOOL gotExit = GetExitCodeProcess(pi.hProcess, &buildExit);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            if (waitResult != WAIT_OBJECT_0 || !gotExit || buildExit != 0)
+            {
+                std::cout << "打包失败，原有 exe 已保留。\n";
+                Pause();
+                break;
+            }
+            std::string srcExe = distDir + "\\" + exeName;
+            std::string destExe = sourceDir + "\\" + exeName;
+
+            // ==================== 迁移 exe 回源文件目录 ====================
+
+            // 检查源 exe 是否存在
+            DWORD attr = GetFileAttributesA(srcExe.c_str());
+            if (attr == INVALID_FILE_ATTRIBUTES)
+            {
+                std::cout << "\n未找到打包后的 exe: " << srcExe << std::endl;
+                Pause();
+                break;
+            }
+
+            // 尝试迁移
+            if (MoveFileExW(Utf8ToWide(srcExe).c_str(), Utf8ToWide(destExe).c_str(),
+                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
+            {
+                std::cout << "\n[OK] exe 已迁移到: " << destExe << std::endl;
+            }
+            else
+            {
+                std::cout << "\n[FAIL] 迁移失败，原有 exe 已保留。\n";
+                std::cout << "源: " << srcExe << "\n目标: " << destExe << "\n";
+                Pause();
+                break;
+            }
+
+            // 清理缓存
+            std::string cleanBuild = "rmdir /s /q \"" + buildDir + "\" >nul 2>&1";
+            system(cleanBuild.c_str());
+            std::string cleanSpec = "rmdir /s /q \"" + specDir + "\" >nul 2>&1";
+            system(cleanSpec.c_str());
+
+            std::cout << "\n打包完成。" << std::endl;
+            Pause();
+            break;
+        } // ← 这个右大括号必须有！
         case 8:
             {
                 RunCmd("pip install nuitka");
@@ -7136,9 +7153,11 @@ case 15:
 // 获取本地 exe 的 SHA256
 std::string GetLocalExeHash()
 {
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    return GetFileSHA256(exePath);
+    wchar_t exePath[MAX_PATH];
+    DWORD length = GetModuleFileNameW(NULL, exePath, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH)
+        return "";
+    return GetFileSHA256(std::filesystem::path(exePath).u8string());
 }
 
 // 获取 zip 中 exe 的 SHA256
@@ -7191,19 +7210,18 @@ std::string GetRemoteExeHash(const std::string& zipPath)
 
 std::string GetLastVersionFile()
 {
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    std::string dir = exePath;
-    size_t pos = dir.find_last_of("\\/");
-    if (pos != std::string::npos) dir = dir.substr(0, pos);
-    return dir + "\\last_version.txt";
+    wchar_t exePath[MAX_PATH];
+    DWORD length = GetModuleFileNameW(NULL, exePath, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH)
+        return "";
+    return (std::filesystem::path(exePath).parent_path() / L"last_version.txt").u8string();
 }
 
 // 读取上次版本
 std::string GetLastVersion()
 {
     std::string file = GetLastVersionFile();
-    std::ifstream f(file);
+    std::ifstream f(std::filesystem::u8path(file));
     if (f.is_open())
     {
         std::string ver;
@@ -7218,7 +7236,7 @@ std::string GetLastVersion()
 void SaveCurrentVersion()
 {
     std::string file = GetLastVersionFile();
-    std::ofstream f(file);
+    std::ofstream f(std::filesystem::u8path(file));
     if (f.is_open())
     {
         f << TOOLBOX_VERSION;
@@ -7227,97 +7245,51 @@ void SaveCurrentVersion()
 }
 
 // 获取 GitHub 最新版本信息（不用 irm，用 Invoke-WebRequest）
-bool GetLatestReleaseInfo(std::string& tagName, std::string& downloadUrl, std::string& body)
+bool GetLatestReleaseInfo(std::string &tagName, std::string &downloadUrl, std::string &body)
 {
-    std::string jsonFile = "C:\\toolbox_release.json";
-    DeleteFileA(jsonFile.c_str());
+    tagName.clear();
+    downloadUrl.clear();
+    body.clear();
+    wchar_t tempPath[MAX_PATH], outputPath[MAX_PATH];
+    DWORD length = GetTempPathW(MAX_PATH, tempPath);
+    if (!length || length >= MAX_PATH || !GetTempFileNameW(tempPath, L"stb", 0, outputPath))
+        return false;
+    if (!SetEnvironmentVariableW(L"TOOLBOX_RELEASE_OUTPUT", outputPath))
+    {
+        DeleteFileW(outputPath);
+        return false;
+    }
 
-       std::string cmd = "C:\\Windows\\System32\\curl.exe -s -L --ssl-no-revoke -H \"User-Agent: System-Toolbox\" -o \"" + jsonFile + "\" " + GITHUB_API_URL;
-    system(cmd.c_str());
-
+    // PowerShell 负责解析 JSON，保留更新说明中的引号、换行及 Unicode。
+    std::string cmd = "powershell -NoProfile -NonInteractive -Command \""
+        "$ErrorActionPreference='Stop';"
+        "$ProgressPreference='SilentlyContinue';"
+        "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;"
+        "$r=Invoke-RestMethod -Uri '" GITHUB_API_URL "' -Headers @{'User-Agent'='System-Toolbox'} -TimeoutSec 30;"
+        "if ([string]::IsNullOrWhiteSpace($r.tag_name)) { throw 'Missing release tag' };"
+        "$asset=$r.assets | Where-Object { $_.name -like '*.zip' } | Select-Object -First 1;"
+        "$data=[string]$r.tag_name+[char]10+[string]$asset.browser_download_url+[char]10+[string]$r.body;"
+        "[IO.File]::WriteAllText($env:TOOLBOX_RELEASE_OUTPUT,$data,(New-Object Text.UTF8Encoding $false))\"";
     std::cout << "正在检查最新版本...\n";
-    system(cmd.c_str());
-
-    DWORD attr = GetFileAttributesA(jsonFile.c_str());
-    if (attr == INVALID_FILE_ATTRIBUTES)
+    int status = system(cmd.c_str());
+    SetEnvironmentVariableW(L"TOOLBOX_RELEASE_OUTPUT", nullptr);
+    std::ifstream file(std::filesystem::path(outputPath), std::ios::binary);
+    bool ok = status == 0 && std::getline(file, tagName) && std::getline(file, downloadUrl);
+    if (ok)
     {
-        std::cout << "网络连接失败或仓库不存在" << std::endl;
-        return false;
+        std::ostringstream contents;
+        contents << file.rdbuf();
+        body = contents.str();
     }
-
-    std::ifstream file(jsonFile);
-    if (!file.is_open())
-    {
-        std::cout << "无法读取版本信息" << std::endl;
-        return false;
-    }
-
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    std::string json = buffer.str();
     file.close();
-    DeleteFileA(jsonFile.c_str());
-
-    if (json.empty())
+    DeleteFileW(outputPath);
+    if (!ok)
     {
-        std::cout << "服务器返回空数据" << std::endl;
-        return false;
+        tagName.clear();
+        downloadUrl.clear();
+        std::cout << "无法获取最新版本，请检查网络连接或稍后重试。\n";
     }
-
-    if (json.find("\"message\"") != std::string::npos &&
-        json.find("Not Found") != std::string::npos)
-    {
-        std::cout << "\n未发布任何版本！" << std::endl;
-        return false;
-    }
-
-    // 解析 tag_name
-    size_t pos = json.find("\"tag_name\"");
-    if (pos == std::string::npos) return false;
-    pos = json.find(':', pos);
-    pos = json.find('"', pos);
-    size_t end = json.find('"', pos + 1);
-    tagName = json.substr(pos + 1, end - pos - 1);
-
-    // 解析 browser_download_url（找 .zip）
-    pos = json.find("\"browser_download_url\"");
-    while (pos != std::string::npos)
-    {
-        pos = json.find(':', pos);
-        pos = json.find('"', pos);
-        end = json.find('"', pos + 1);
-        std::string url = json.substr(pos + 1, end - pos - 1);
-        if (url.size() > 4 && url.substr(url.size() - 4) == ".zip")
-        {
-            downloadUrl = url;
-            break;
-        }
-        pos = json.find("\"browser_download_url\"", end);
-    }
-
-    // 解析 body
-    pos = json.find("\"body\"");
-    if (pos != std::string::npos)
-    {
-        pos = json.find(':', pos);
-        pos = json.find('"', pos);
-        end = json.find("\",", pos + 1);
-        if (end != std::string::npos)
-            body = json.substr(pos + 1, end - pos - 1);
-    }
-
-    // 替换 JSON 转义字符
-    size_t rpos;
-    while ((rpos = body.find("\\r\\n")) != std::string::npos)
-        body.replace(rpos, 4, "\n");
-    while ((rpos = body.find("\\n")) != std::string::npos)
-        body.replace(rpos, 2, "\n");
-    while ((rpos = body.find("\\r")) != std::string::npos)
-        body.replace(rpos, 2, "\r");
-    while ((rpos = body.find("\\\"")) != std::string::npos)
-        body.replace(rpos, 2, "\"");
-
-    return true;
+    return ok;
 }
 
 // 检测是否刚更新过版本
@@ -7347,6 +7319,13 @@ void ShowUpdateContent()
     std::cout << "========== 更新成功 ==========\n";
     std::cout << "检测到程序已更新\n";
     std::cout << "==============================\n\n";
+    SaveCurrentVersion();
+    if (!g_bOnlineMode)
+    {
+        std::cout << "离线模式下请访问 GitHub 查看更新内容。\n";
+        Pause();
+        return;
+    }
     std::cout << "正在获取更新内容...\n\n";
 
     std::string tagName, downloadUrl, body;
@@ -7354,8 +7333,6 @@ void ShowUpdateContent()
     {
         std::cout << "无法获取更新内容，请访问 GitHub 查看。" << std::endl;
 
-        // 保存当前哈希，避免下次重复提示
-        SaveCurrentHash(GetLocalExeHash());
         Pause();
         return;
     }
@@ -7364,30 +7341,11 @@ void ShowUpdateContent()
     std::cout << body << "\n\n";
     std::cout << "完整更新日志：" << GITHUB_RELEASE_URL << "\n";
 
-    // 保存当前哈希
-    SaveCurrentHash(GetLocalExeHash());
     Pause();
 }
 
 // 保存当前哈希
-void SaveCurrentHash(const std::string& hash)
-{
-    // 设置当前进程环境变量
-    SetEnvironmentVariableA(ENV_LAST_HASH, hash.c_str());
 
-    // 持久化到注册表（HKCU\Environment）
-    HKEY hKey;
-    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Environment", 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS)
-    {
-        RegSetValueExA(hKey, ENV_LAST_HASH, 0, REG_SZ,
-                       (const BYTE*)hash.c_str(), (DWORD)(hash.length() + 1));
-        RegCloseKey(hKey);
-    }
-
-    // 广播环境变量变更
-    SendMessageTimeoutA(HWND_BROADCAST, WM_SETTINGCHANGE, 0,
-                        (LPARAM)"Environment", SMTO_ABORTIFHUNG, 5000, NULL);
-}
 
 // 软件更新主函数
 void SoftwareUpdate()
@@ -7398,16 +7356,13 @@ void SoftwareUpdate()
     std::cout << "仓库: https://github.com/huvubb/system-toolbox\n";
     std::cout << "==============================\n\n";
 
-    // 获取本地 exe 哈希
-    std::cout << "正在计算本地版本哈希...\n";
     std::string localHash = GetLocalExeHash();
     if (localHash.empty())
     {
-        std::cout << "无法计算本地文件哈希！" << std::endl;
+        std::cout << "无法计算本地文件哈希，已取消更新。\n";
         Pause();
         return;
     }
-    std::cout << "本地哈希: " << localHash << "\n\n";
 
     // 获取 GitHub 最新版本信息
     std::string latestVersion, downloadUrl, body;
@@ -7435,16 +7390,18 @@ void SoftwareUpdate()
     std::string zipPath = updateDir + "\\update.zip";
     DeleteFileA(zipPath.c_str());
 
-        // 下载 zip
+    // 下载 zip
     std::cout << "\n正在连接到更新服务器 [完成]\n";
     std::cout << "\n正在下载最新版本...\n";
 
     // 方法1：PowerShell 直连下载
     std::string dlCmd = "powershell -Command \""
-        "$ProgressPreference='SilentlyContinue';"
-        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12;"
-        "Invoke-WebRequest -Uri '" + downloadUrl + "' "
-        "-OutFile '" + zipPath + "' -UseBasicParsing -TimeoutSec 300\"";
+                        "$ProgressPreference='SilentlyContinue';"
+                        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12;"
+                        "Invoke-WebRequest -Uri '" +
+                        downloadUrl + "' "
+                                      "-OutFile '" +
+                        zipPath + "' -UseBasicParsing -TimeoutSec 300\"";
     system(dlCmd.c_str());
 
     // 检查是否成功
@@ -7455,10 +7412,12 @@ void SoftwareUpdate()
         std::cout << "直连失败，尝试镜像...\n";
         std::string mirrorUrl = "https://ghproxy.net/" + downloadUrl;
         std::string mirrorCmd = "powershell -Command \""
-            "$ProgressPreference='SilentlyContinue';"
-            "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12;"
-            "Invoke-WebRequest -Uri '" + mirrorUrl + "' "
-            "-OutFile '" + zipPath + "' -UseBasicParsing -TimeoutSec 300\"";
+                                "$ProgressPreference='SilentlyContinue';"
+                                "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12;"
+                                "Invoke-WebRequest -Uri '" +
+                                mirrorUrl + "' "
+                                            "-OutFile '" +
+                                zipPath + "' -UseBasicParsing -TimeoutSec 300\"";
         system(mirrorCmd.c_str());
 
         attr = GetFileAttributesA(zipPath.c_str());
@@ -7503,7 +7462,8 @@ void SoftwareUpdate()
 
     // 版本不同，询问用户
     std::cout << "发现新版本！\n\n";
-    std::cout << "=== 更新说明 ===\n" << body << "\n\n";
+    std::cout << "=== 更新说明 ===\n"
+              << body << "\n\n";
     std::cout << "是否更新？(y/n): ";
     char c;
     std::cin >> c;
@@ -7556,14 +7516,24 @@ void SoftwareUpdate()
 
     // 启动更新脚本
     std::string runBat = "cmd /c \"" + batPath + "\"";
-    STARTUPINFOA si = { sizeof(si) };
-    PROCESS_INFORMATION pi;
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
-    CreateProcessA(NULL, (LPSTR)runBat.c_str(), NULL, NULL, FALSE,
-                   CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-    if (pi.hProcess) CloseHandle(pi.hProcess);
-    if (pi.hThread) CloseHandle(pi.hThread);
+    std::vector<char> commandLine(runBat.begin(), runBat.end());
+    commandLine.push_back('\0');
+    if (!CreateProcessA(NULL, commandLine.data(), NULL, NULL, FALSE,
+                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+    {
+        std::cout << "无法启动更新脚本，错误码: " << GetLastError() << "\n";
+        Pause();
+        return;
+    }
+    if (pi.hProcess)
+        CloseHandle(pi.hProcess);
+    if (pi.hThread)
+        CloseHandle(pi.hThread);
 
     std::cout << "程序即将退出..." << std::endl;
     Sleep(2000);
@@ -9775,7 +9745,7 @@ if (algo.empty()) algo = "SHA256";
                     GUID guid;
                     CoCreateGuid(&guid);
                     char buf[64];
-                    sprintf(buf, "%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+                    sprintf(buf, "%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X",
                             guid.Data1, guid.Data2, guid.Data3,
                             guid.Data4[0], guid.Data4[1],
                             guid.Data4[2], guid.Data4[3], guid.Data4[4],
@@ -9812,43 +9782,152 @@ std::string NumToBase(unsigned long long num, int base)
 }
 
 // 字符串转指定进制（按字节）
-std::string StringToBase(const std::string& text, int base, const std::string& sep)
+std::string StringToBase(const std::string &text, int base, const std::string &sep)
 {
+    if (base < 2 || base > 36)
+        return "";
     std::string result;
-    for (size_t i = 0; i < text.size(); i++)
+    size_t width = base == 2 ? 8 : base == 8 ? 3 : base == 16 ? 2 : 0;
+    for (unsigned char byte : text)
     {
-        unsigned char c = (unsigned char)text[i];
-        if (base == 2)
-        {
-            char buf[9];
-            for (int j = 7; j >= 0; j--)
-                buf[7 - j] = ((c >> j) & 1) ? '1' : '0';
-            buf[8] = 0;
-            result += buf;
-        }
-        else if (base == 8)
-        {
-            char buf[4];
-            sprintf(buf, "%03o", c);
-            result += buf;
-        }
-        else if (base == 10)
-        {
-            char buf[8];
-            sprintf(buf, "%d", c);
-            result += buf;
-        }
-        else if (base == 16)
-        {
-            char buf[4];
-            sprintf(buf, "%02X", c);
-            result += buf;
-        }
-
-        if (i < text.size() - 1) result += sep;
+        if (!result.empty())
+            result += sep;
+        std::string value = NumToBase(byte, base);
+        if (value.size() < width)
+            value.insert(0, width - value.size(), '0');
+        result += value;
     }
     return result;
 }
+
+bool TryParseUnsigned(const std::string &input, int base, unsigned long long &value)
+{
+    size_t first = input.find_first_not_of(" \t\r\n");
+    if (base < 2 || base > 36 || first == std::string::npos || input[first] == '-')
+        return false;
+    try
+    {
+        size_t end = 0;
+        value = std::stoull(input, &end, base);
+        return input.find_first_not_of(" \t\r\n", end) == std::string::npos;
+    }
+    catch (const std::exception &)
+    {
+        return false;
+    }
+}
+
+bool ConvertFileBase(const std::string &src, const std::string &dst, int base, bool decode)
+{
+    auto source = std::filesystem::u8path(src);
+    auto destination = std::filesystem::u8path(dst);
+    std::error_code error;
+    if (std::filesystem::equivalent(source, destination, error))
+        return false;
+    std::ifstream in(source, std::ios::binary);
+    if (!in)
+        return false;
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (in.bad())
+        return false;
+    in.close();
+    std::string result;
+
+    if (base == 64)
+    {
+        if (content.size() > (std::numeric_limits<DWORD>::max)())
+            return false;
+        if (!content.empty())
+        {
+            DWORD size = 0;
+            if (decode)
+            {
+                DWORD flags = CRYPT_STRING_BASE64 | CRYPT_STRING_STRICT;
+                if (!CryptStringToBinaryA(content.data(), static_cast<DWORD>(content.size()),
+                                          flags, nullptr, &size, nullptr, nullptr))
+                    return false;
+                result.resize(size);
+                if (!CryptStringToBinaryA(content.data(), static_cast<DWORD>(content.size()), flags,
+                                          reinterpret_cast<BYTE *>(result.data()), &size, nullptr, nullptr))
+                    return false;
+                result.resize(size);
+            }
+            else
+            {
+                DWORD flags = CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF;
+                if (!CryptBinaryToStringA(reinterpret_cast<const BYTE *>(content.data()),
+                                          static_cast<DWORD>(content.size()), flags, nullptr, &size))
+                    return false;
+                result.resize(size);
+                if (!CryptBinaryToStringA(reinterpret_cast<const BYTE *>(content.data()),
+                                          static_cast<DWORD>(content.size()), flags, result.data(), &size))
+                    return false;
+                while (!result.empty() && result.back() == '\0')
+                    result.pop_back();
+            }
+        }
+    }
+    else if (!decode && base == 0)
+    {
+        for (int radix : {2, 10, 16})
+            result += std::to_string(radix) + "进制:\n" + StringToBase(content, radix, " ") + "\n\n";
+    }
+    else if (base < 2 || base > 36)
+        return false;
+    else if (!decode)
+        result = StringToBase(content, base, " ");
+    else
+    {
+        std::istringstream tokens(content);
+        std::string token;
+        while (tokens >> token)
+        {
+            unsigned long long byte = 0;
+            if (!TryParseUnsigned(token, base, byte) || byte > 255)
+                return false;
+            result += static_cast<char>(byte);
+        }
+    }
+    // 校验完成后才打开目标文件，错误输入不会覆盖已有内容。
+    std::ofstream out(destination, std::ios::binary | std::ios::trunc);
+    if (!out)
+        return false;
+    out.write(result.data(), static_cast<std::streamsize>(result.size()));
+    out.flush();
+    return static_cast<bool>(out);
+}
+
+int DumpHex(std::istream &in, std::ostream &out, int maxBytes)
+{
+    int totalRead = 0;
+    unsigned char buffer[16];
+    while (totalRead < maxBytes)
+    {
+        in.read(reinterpret_cast<char *>(buffer), std::min(16, maxBytes - totalRead));
+        int bytesRead = static_cast<int>(in.gcount());
+        if (bytesRead == 0)
+            break;
+        std::ostringstream line;
+        line << std::hex << std::uppercase << std::setfill('0') << std::setw(8) << totalRead << "  ";
+        for (int i = 0; i < 16; ++i)
+        {
+            if (i < bytesRead)
+                line << std::setw(2) << static_cast<unsigned int>(buffer[i]) << ' ';
+            else
+                line << "   ";
+            if (i == 7)
+                line << ' ';
+        }
+        line << " |";
+        for (int i = 0; i < bytesRead; ++i)
+            line << (buffer[i] >= 32 && buffer[i] < 127 ? static_cast<char>(buffer[i]) : '.');
+        out << line.str() << "|\n";
+        totalRead += bytesRead;
+    }
+    return totalRead;
+}
+
+
 
 // 进制转换菜单
 void BaseConverterMenu()
@@ -9898,317 +9977,309 @@ void BaseConverterMenu()
 
         int choice = GetIntInput("请选择: ");
 
-        if (choice == 0) break;
+        if (choice == 0)
+            break;
 
         switch (choice)
         {
-            // ==================== 文本转进制 ====================
-            case 1:
-            case 2:
-            case 3:
-            case 4:
-            case 5:
-            case 6:
-            case 7:
+        // ==================== 文本转进制 ====================
+        case 1:
+        case 2:
+        case 3:
+        case 4:
+        case 5:
+        case 6:
+        case 7:
+        {
+            ClearScreen();
+            std::cout << "========== 文本转进制 ==========\n";
+            std::string text = GetInput("输入文本: ");
+            if (text.empty())
             {
-                ClearScreen();
-                std::cout << "========== 文本转进制 ==========\n";
-                std::string text = GetInput("输入文本: ");
-                if (text.empty()) { Pause(); break; }
-
-                std::string sep = GetInput("分隔符（默认空格，可空）: ");
-                if (sep.empty()) sep = " ";
-
-                std::cout << "\n=== 转换结果 ===\n";
-                if (choice == 1 || choice == 7)
-                    std::cout << "2 进制:  " << StringToBase(text, 2, sep) << "\n";
-                if (choice == 2 || choice == 7)
-                    std::cout << "8 进制:  " << StringToBase(text, 8, sep) << "\n";
-                if (choice == 3 || choice == 7)
-                    std::cout << "10 进制: " << StringToBase(text, 10, sep) << "\n";
-                if (choice == 4 || choice == 7)
-                    std::cout << "16 进制: " << StringToBase(text, 16, sep) << "\n";
-                if (choice == 5 || choice == 7)
-                {
-                    std::cout << "32 进制: ";
-                    for (char c : text) std::cout << NumToBase((unsigned char)c, 32) << sep;
-                    std::cout << "\n";
-                }
-                if (choice == 6 || choice == 7)
-                {
-                    std::cout << "36 进制: ";
-                    for (char c : text) std::cout << NumToBase((unsigned char)c, 36) << sep;
-                    std::cout << "\n";
-                }
                 Pause();
                 break;
             }
 
-            // ==================== 进制转文本 ====================
+            std::string sep = GetInput("分隔符（默认空格，可空）: ");
+            if (sep.empty())
+                sep = " ";
+
+            std::cout << "\n=== 转换结果 ===\n";
+            if (choice == 1 || choice == 7)
+                std::cout << "2 进制:  " << StringToBase(text, 2, sep) << "\n";
+            if (choice == 2 || choice == 7)
+                std::cout << "8 进制:  " << StringToBase(text, 8, sep) << "\n";
+            if (choice == 3 || choice == 7)
+                std::cout << "10 进制: " << StringToBase(text, 10, sep) << "\n";
+            if (choice == 4 || choice == 7)
+                std::cout << "16 进制: " << StringToBase(text, 16, sep) << "\n";
+            if (choice == 5 || choice == 7)
+            {
+                std::cout << "32 进制: ";
+                for (char c : text)
+                    std::cout << NumToBase((unsigned char)c, 32) << sep;
+                std::cout << "\n";
+            }
+            if (choice == 6 || choice == 7)
+            {
+                std::cout << "36 进制: ";
+                for (char c : text)
+                    std::cout << NumToBase((unsigned char)c, 36) << sep;
+                std::cout << "\n";
+            }
+            Pause();
+            break;
+        }
+
+        // ==================== 进制转文本 ====================
+        case 8:
+        case 9:
+        case 10:
+        case 11:
+        case 12:
+        case 13:
+        {
+            ClearScreen();
+            std::cout << "========== 进制转文本 ==========\n";
+            std::string input = GetInput("输入进制字符串（用空格分隔）: ");
+            if (input.empty())
+            {
+                Pause();
+                break;
+            }
+
+            int base = 16;
+            switch (choice)
+            {
             case 8:
+                base = 2;
+                break;
             case 9:
+                base = 8;
+                break;
             case 10:
+                base = 10;
+                break;
             case 11:
+                base = 16;
+                break;
             case 12:
+                base = 32;
+                break;
             case 13:
-            {
-                ClearScreen();
-                std::cout << "========== 进制转文本 ==========\n";
-                std::string input = GetInput("输入进制字符串（用空格分隔）: ");
-                if (input.empty()) { Pause(); break; }
-
-                int base = 16;
-                switch (choice)
-                {
-                    case 8: base = 2; break;
-                    case 9: base = 8; break;
-                    case 10: base = 10; break;
-                    case 11: base = 16; break;
-                    case 12: base = 32; break;
-                    case 13: base = 36; break;
-                }
-
-                std::cout << "\n=== 解码结果 ===\n";
-                std::stringstream ss(input);
-                std::string token;
-                while (ss >> token)
-                {
-                    try
-                    {
-                        unsigned long val = std::stoul(token, nullptr, base);
-                        std::cout << (char)val;
-                    }
-                    catch (...) {}
-                }
-                std::cout << std::endl;
-                Pause();
+                base = 36;
                 break;
             }
 
-            // ==================== 任意进制转换 ====================
-            case 14:
+            std::cout << "\n=== 解码结果 ===\n";
+            std::stringstream ss(input);
+            std::string token;
+            while (ss >> token)
             {
-                ClearScreen();
-                std::cout << "========== 任意进制转换 ==========\n";
-                std::string num = GetInput("输入数字: ");
-                int fromBase = GetIntInput("源进制（2-36）: ", 10);
-                int toBase = GetIntInput("目标进制（2-36）: ", 16);
-
                 try
                 {
-                    unsigned long long val = std::stoull(num, nullptr, fromBase);
-                    std::cout << "\n=== 转换结果 ===\n";
-                    std::cout << "十进制: " << val << "\n";
-                    std::cout << "目标进制(" << toBase << "): " << NumToBase(val, toBase) << std::endl;
+                    unsigned long val = std::stoul(token, nullptr, base);
+                    std::cout << (char)val;
                 }
                 catch (...)
                 {
-                    std::cout << "转换失败！请检查输入。" << std::endl;
                 }
-                Pause();
-                break;
             }
+            std::cout << std::endl;
+            Pause();
+            break;
+        }
 
+        // ==================== 任意进制转换 ====================
+        case 14:
+        {
+            ClearScreen();
+            std::cout << "========== 任意进制转换 ==========\n";
+            std::string num = GetInput("输入数字: ");
+            int fromBase = GetIntInput("源进制（2-36）: ", 10);
+            int toBase = GetIntInput("目标进制（2-36）: ", 16);
+
+            try
+            {
+                unsigned long long val = 0;
+                if (toBase < 2 || toBase > 36 || !TryParseUnsigned(num, fromBase, val))
+                    throw std::invalid_argument("Invalid number or base");
+                std::cout << "\n=== 转换结果 ===\n";
+                std::cout << "十进制: " << val << "\n";
+                std::cout << "目标进制(" << toBase << "): " << NumToBase(val, toBase) << std::endl;
+            }
+            catch (...)
+            {
+                std::cout << "转换失败！请检查输入。" << std::endl;
+            }
+            Pause();
+            break;
+        }
+
+        case 15:
+        case 16:
+        case 17:
+        case 18:
+        {
+            ClearScreen();
+            std::string num;
+            int fromBase, toBase;
+
+            switch (choice)
+            {
             case 15:
+                std::cout << "========== 十进制转二进制 ==========\n";
+                fromBase = 10;
+                toBase = 2;
+                break;
             case 16:
+                std::cout << "========== 十进制转十六进制 ==========\n";
+                fromBase = 10;
+                toBase = 16;
+                break;
             case 17:
+                std::cout << "========== 二进制转十进制 ==========\n";
+                fromBase = 2;
+                toBase = 10;
+                break;
             case 18:
+                std::cout << "========== 十六进制转十进制 ==========\n";
+                fromBase = 16;
+                toBase = 10;
+                break;
+            }
+
+            num = GetInput("输入数字: ");
+            try
             {
-                ClearScreen();
-                std::string num;
-                int fromBase, toBase;
+                unsigned long long val = 0;
+                if (!TryParseUnsigned(num, fromBase, val))
+                    throw std::invalid_argument("Invalid number");
+                std::cout << "\n结果: " << NumToBase(val, toBase) << std::endl;
+            }
+            catch (...)
+            {
+                std::cout << "转换失败！" << std::endl;
+            }
+            Pause();
+            break;
+        }
 
-                switch (choice)
-                {
-                    case 15: std::cout << "========== 十进制转二进制 ==========\n"; fromBase = 10; toBase = 2; break;
-                    case 16: std::cout << "========== 十进制转十六进制 ==========\n"; fromBase = 10; toBase = 16; break;
-                    case 17: std::cout << "========== 二进制转十进制 ==========\n"; fromBase = 2; toBase = 10; break;
-                    case 18: std::cout << "========== 十六进制转十进制 ==========\n"; fromBase = 16; toBase = 10; break;
-                }
+        // ==================== 文件进制转换 ====================
+        case 19:
+        case 20:
+        case 21:
+        case 22:
+        case 23:
+        case 24:
+        case 25:
+        case 26:
+        case 27:
+        {
+            ClearScreen();
+            bool decode = choice >= 24;
+            std::cout << (decode ? "========== 进制转文件 ==========\n" : "========== 文件转进制 ==========\n");
+            std::string src = GetInput("输入文件路径: ");
+            std::string dst = GetInput("输出文件路径: ");
+            const int bases[] = {2, 16, 10, 64, 0};
+            int base = bases[decode ? choice - 24 : choice - 19];
+            if (src.empty() || dst.empty() || !ConvertFileBase(src, dst, base, decode))
+                std::cout << "转换失败！请检查路径、输入格式，且源文件与目标文件不能相同。\n";
+            else
+                std::cout << "文件已转换。\n";
+            Pause();
+            break;
+        }
 
-                num = GetInput("输入数字: ");
-                try
+        // ==================== ASCII 字符表 ====================
+        case 28:
+        {
+            ClearScreen();
+            std::cout << "========== ASCII 字符编码表 ==========\n\n";
+            std::cout << "十进制  十六进制  字符\n";
+            std::cout << "------  --------  ----\n";
+            for (int i = 32; i < 127; i++)
+            {
+                printf("%4d    0x%02X     %c\n", i, i, (char)i);
+            }
+            Pause();
+            break;
+        }
+
+        // ==================== 批量转换 ====================
+        case 29:
+        {
+            ClearScreen();
+            std::cout << "========== 批量转换 ==========\n";
+            std::string dir = GetInput("目录路径: ");
+            int base = GetIntInput("目标进制（2/8/10/16）: ", 16);
+            if (dir.empty() || (base != 2 && base != 8 && base != 10 && base != 16))
+            {
+                std::cout << "请输入有效目录及进制。\n";
+                Pause();
+                break;
+            }
+            std::error_code error;
+            std::filesystem::directory_iterator files(std::filesystem::u8path(dir), error);
+            std::vector<std::filesystem::path> sources;
+            std::string suffix = ".base" + std::to_string(base) + ".txt";
+            while (!error && files != std::filesystem::directory_iterator())
+            {
+                auto path = files->path();
+                std::string name = path.filename().u8string();
+                if (files->is_regular_file(error) &&
+                    (name.size() < suffix.size() || name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0))
+                    sources.push_back(path);
+                if (!error)
+                    files.increment(error);
+            }
+            if (error)
+                std::cout << "无法读取目录: " << error.message() << "\n";
+            else
+            {
+                for (const auto &path : sources)
                 {
-                    unsigned long long val = std::stoull(num, nullptr, fromBase);
-                    std::cout << "\n结果: " << NumToBase(val, toBase) << std::endl;
+                    std::string src = path.u8string();
+                    std::cout << (ConvertFileBase(src, src + suffix, base, false) ? "[OK] " : "[FAIL] ") << src << "\n";
                 }
-                catch (...)
-                {
-                    std::cout << "转换失败！" << std::endl;
-                }
+            }
+            Pause();
+            break;
+        }
+
+        // ==================== 二进制文件查看器 ====================
+        case 30:
+        {
+            ClearScreen();
+            std::cout << "========== 二进制文件查看器 ==========\n";
+            std::string file = GetInput("文件路径: ");
+            int maxBytes = GetIntInput("查看字节数（默认 256）: ", 256);
+            if (file.empty())
+            {
                 Pause();
                 break;
             }
 
-            // ==================== 文件转进制 ====================
-            case 19:
-            case 20:
-            case 21:
-            case 22:
-            case 23:
+            std::ifstream in(file, std::ios::binary);
+            if (!in.is_open())
             {
-                ClearScreen();
-                std::cout << "========== 文件转进制 ==========\n";
-                std::string src = GetInput("输入文件路径: ");
-                std::string dst = GetInput("输出文本路径: ");
-                if (src.empty() || dst.empty()) { Pause(); break; }
-
-                std::ifstream in(src, std::ios::binary);
-                if (!in.is_open())
-                {
-                    std::cout << "无法打开文件！" << std::endl;
-                    Pause();
-                    break;
-                }
-
-                std::string content((std::istreambuf_iterator<char>(in)),
-                                     std::istreambuf_iterator<char>());
-                in.close();
-
-                std::ofstream out(dst);
-                if (choice == 19 || choice == 23) out << "2进制:\n" << StringToBase(content, 2, " ") << "\n\n";
-                if (choice == 21 || choice == 23) out << "10进制:\n" << StringToBase(content, 10, " ") << "\n\n";
-                if (choice == 20 || choice == 23) out << "16进制:\n" << StringToBase(content, 16, " ") << "\n\n";
-                out.close();
-
-                std::cout << "\n文件已转换。\n";
-                std::cout << "输出大小: ";
-                std::cout << (std::ifstream(dst, std::ios::ate).tellg()) << " 字节\n";
+                std::cout << "无法打开文件！" << std::endl;
                 Pause();
                 break;
             }
 
-            // ==================== 进制转文件 ====================
-            case 24:
-            case 25:
-            case 26:
-            {
-                ClearScreen();
-                std::cout << "========== 进制转文件 ==========\n";
-                std::string src = GetInput("输入文本文件路径: ");
-                std::string dst = GetInput("输出二进制文件路径: ");
-                int base = 16;
-                if (choice == 24) base = 2;
-                if (choice == 26) base = 10;
-                if (choice == 25) base = 16;
+            std::cout << "\n=== 十六进制视图 ===\n\n";
+            int totalRead = DumpHex(in, std::cout, maxBytes);
+            in.close();
 
-                if (src.empty() || dst.empty()) { Pause(); break; }
+            std::cout << "\n共查看 " << totalRead << " 字节\n";
+            Pause();
+            break;
+        }
 
-                std::ifstream in(src);
-                if (!in.is_open())
-                {
-                    std::cout << "无法打开文件！" << std::endl;
-                    Pause();
-                    break;
-                }
-
-                std::ofstream out(dst, std::ios::binary);
-                std::string token;
-                while (in >> token)
-                {
-                    try
-                    {
-                        unsigned long val = std::stoul(token, nullptr, base);
-                        out.put((char)val);
-                    }
-                    catch (...) {}
-                }
-                in.close();
-                out.close();
-
-                std::cout << "\n文件已还原。\n";
-                Pause();
-                break;
-            }
-
-            // ==================== ASCII 字符表 ====================
-            case 28:
-            {
-                ClearScreen();
-                std::cout << "========== ASCII 字符编码表 ==========\n\n";
-                std::cout << "十进制  十六进制  字符\n";
-                std::cout << "------  --------  ----\n";
-                for (int i = 32; i < 127; i++)
-                {
-                    printf("%4d    0x%02X     %c\n", i, i, (char)i);
-                }
-                Pause();
-                break;
-            }
-
-            // ==================== 批量转换 ====================
-            case 29:
-            {
-                ClearScreen();
-                std::cout << "========== 批量转换 ==========\n";
-                std::string dir = GetInput("目录路径: ");
-                int base = GetIntInput("目标进制（2/8/10/16）: ", 16);
-                if (dir.empty()) { Pause(); break; }
-
-                std::string cmd = "for %f in (\"" + dir + "\\*\") do @certutil -encode \"%f\" \"%f.b64\"";
-                RunCmd("cmd /c \"" + cmd + "\"");
-                Pause();
-                break;
-            }
-
-            // ==================== 二进制文件查看器 ====================
-            case 30:
-            {
-                ClearScreen();
-                std::cout << "========== 二进制文件查看器 ==========\n";
-                std::string file = GetInput("文件路径: ");
-                int maxBytes = GetIntInput("查看字节数（默认 256）: ", 256);
-                if (file.empty()) { Pause(); break; }
-
-                std::ifstream in(file, std::ios::binary);
-                if (!in.is_open())
-                {
-                    std::cout << "无法打开文件！" << std::endl;
-                    Pause();
-                    break;
-                }
-
-                std::cout << "\n=== 十六进制视图 ===\n\n";
-                unsigned char buffer[16];
-                int offset = 0;
-                int totalRead = 0;
-
-                while (in.read((char*)buffer, 16) && totalRead < maxBytes)
-                {
-                    // 偏移
-                    printf("%08X  ", offset);
-
-                    // 十六进制
-                    std::streamsize bytesRead = in.gcount();
-                    for (int i = 0; i < 16; i++)
-                    {
-                        if (i < bytesRead) printf("%02X ", buffer[i]);
-                        else printf("   ");
-                        if (i == 7) printf(" ");
-                    }
-
-                    // 字符
-                    printf(" |");
-                    for (int i = 0; i < bytesRead; i++)
-                    {
-                        if (buffer[i] >= 32 && buffer[i] < 127) putchar(buffer[i]);
-                        else putchar('.');
-                    }
-                    printf("|\n");
-
-                    offset += 16;
-                    totalRead += (int)bytesRead;
-                }
-                in.close();
-
-                std::cout << "\n共查看 " << totalRead << " 字节\n";
-                Pause();
-                break;
-            }
-
-            default:
-                std::cout << "无效选项。" << std::endl;
-                Pause();
+        default:
+            std::cout << "无效选项。" << std::endl;
+            Pause();
         }
     }
 }

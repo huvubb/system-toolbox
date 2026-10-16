@@ -59,4 +59,29 @@
 
 #### MinGW-w64 编译命令
 ```bash
-g++ -o system-toolbox.exe system-toolbox.cpp -std=c++17 -fexec-charset=UTF-8 -finput-charset=UTF-8 -lws2_32 -lshell32 -ladvapi32 -lopengl32 -lgdi32 -luser32 -pthread
+g++ -o system-toolbox.exe system-toolbox.cpp -std=c++17 -O2 -fexec-charset=UTF-8 -finput-charset=UTF-8 -lws2_32 -lshell32 -ladvapi32 -lole32 -lcrypt32 -lopengl32 -ld3d11 -ldxgi -lgdi32 -luser32 -pthread -static
+```
+
+在项目目录内运行，输出文件使用相对路径；部分 MinGW 链接器不支持包含中文的绝对输出路径。
+
+#### 使用 CMake 构建并测试
+
+需要 CMake 3.16 或更新版本。Visual Studio 开发者终端中执行：
+
+```powershell
+cmake -S . -B build
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
+```
+
+MinGW-w64 配合 Ninja：
+
+```powershell
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+编译器须已加入 PATH。切换编译器时使用新的构建目录。MSVC 可执行文件位于 `build/Release/`，MinGW 位于 `build/`。MinGW 构建静态链接运行库，方便复制到其他 Windows 电脑。
+
+回归测试覆盖整数输入、SHA256、中文路径、更新状态、文件进制及 Base64 往返转换、无效输入保留目标文件、十六进制查看边界。测试不执行磁盘修复、注册表修改或硬件压力测试。GitHub Actions 会使用 MSVC 和 MinGW 分别构建并运行同一套测试。

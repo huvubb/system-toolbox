@@ -1,0 +1,32 @@
+name: Windows build and regression tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [msvc, mingw]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure MSVC
+        if: matrix.compiler == 'msvc'
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+      - name: Configure MinGW
+        if: matrix.compiler == 'mingw'
+        shell: pwsh
+        run: |
+          'C:\msys64\mingw64\bin' | Out-File -FilePath $env:GITHUB_PATH -Append
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=C:/msys64/mingw64/bin/g++.exe
+      - name: Build
+        run: cmake --build build --config Release --parallel 2
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
