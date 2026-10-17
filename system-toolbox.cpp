@@ -7556,7 +7556,7 @@ std::string Utf8ToGbk(const std::string& utf8)
 }
 
 // 执行 FFmpeg 命令
-void RunFFmpeg(const std::string& cmd)
+bool RunFFmpeg(const std::string& cmd)
 {
     std::string gbkCmd = Utf8ToGbk(cmd);
     std::cout << ">> " << cmd << std::endl;
@@ -7565,6 +7565,132 @@ void RunFFmpeg(const std::string& cmd)
     {
         std::cout << "\n[提示] 命令执行失败（返回码: " << ret << "）\n";
     }
+    return ret == 0;
+}
+
+bool ReadNcmUint32(std::istream& input, uint32_t& value)
+{
+    unsigned char bytes[4];
+    if (!input.read(reinterpret_cast<char*>(bytes), sizeof(bytes)))
+        return false;
+    value = static_cast<uint32_t>(bytes[0]) |
+            (static_cast<uint32_t>(bytes[1]) << 8) |
+            (static_cast<uint32_t>(bytes[2]) << 16) |
+            (static_cast<uint32_t>(bytes[3]) << 24);
+    return true;
+}
+
+bool SkipNcmBytes(std::istream& input, uint32_t count)
+{
+    input.seekg(static_cast<std::streamoff>(count), std::ios::cur);
+    return input.good();
+}
+
+bool DecryptNcmKey(std::vector<BYTE>& encryptedKey)
+{
+    if (encryptedKey.empty() || encryptedKey.size() % 16 != 0)
+        return false;
+
+    const BYTE coreKey[] = "#14ljk_!\\]&0U<'(";
+    struct KeyBlob
+    {
+        BLOBHEADER header;
+        DWORD length;
+        BYTE key[sizeof(coreKey) - 1];
+    } keyBlob = {{PLAINTEXTKEYBLOB, CUR_BLOB_VERSION, 0, CALG_AES_128}, sizeof(coreKey) - 1, {}};
+    memcpy(keyBlob.key, coreKey, sizeof(keyBlob.key));
+
+    HCRYPTPROV provider = 0;
+    HCRYPTKEY key = 0;
+    bool ok = CryptAcquireContextW(&provider, nullptr, nullptr, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) &&
+              CryptImportKey(provider, reinterpret_cast<const BYTE*>(&keyBlob), sizeof(keyBlob), 0, 0, &key);
+    DWORD mode = CRYPT_MODE_ECB;
+    ok = ok && CryptSetKeyParam(key, KP_MODE, reinterpret_cast<BYTE*>(&mode), 0);
+    DWORD length = static_cast<DWORD>(encryptedKey.size());
+    ok = ok && CryptDecrypt(key, 0, TRUE, 0, encryptedKey.data(), &length);
+    if (key)
+        CryptDestroyKey(key);
+    if (provider)
+        CryptReleaseContext(provider, 0);
+    encryptedKey.resize(ok ? length : 0);
+    return ok;
+}
+
+bool DecodeNcmAudio(const std::filesystem::path& source, const std::filesystem::path& decoded, std::string& error)
+{
+    std::ifstream input(source, std::ios::binary);
+    if (!input)
+    {
+        error = "无法打开 NCM 文件。";
+        return false;
+    }
+    char magic[8];
+    uint32_t keyLength = 0, metadataLength = 0, imageLength = 0;
+    if (!input.read(magic, sizeof(magic)) || memcmp(magic, "CTENFDAM", sizeof(magic)) != 0 ||
+        !input.ignore(2) || !ReadNcmUint32(input, keyLength) ||
+        keyLength == 0 || keyLength > 1024 * 1024)
+    {
+        error = "不是有效的网易云 NCM 文件。";
+        return false;
+    }
+
+    std::vector<BYTE> audioKey(keyLength);
+    if (!input.read(reinterpret_cast<char*>(audioKey.data()), static_cast<std::streamsize>(audioKey.size())))
+    {
+        error = "NCM 密钥区不完整。";
+        return false;
+    }
+    for (BYTE& byte : audioKey)
+        byte ^= 0x64;
+    if (!DecryptNcmKey(audioKey) || audioKey.size() <= 17 || memcmp(audioKey.data(), "neteasecloudmusic", 17) != 0)
+    {
+        error = "NCM 密钥无效或该文件使用了未支持的加密版本。";
+        return false;
+    }
+    audioKey.erase(audioKey.begin(), audioKey.begin() + 17);
+
+    if (!ReadNcmUint32(input, metadataLength) || metadataLength > 64 * 1024 * 1024 ||
+        !SkipNcmBytes(input, metadataLength) || !SkipNcmBytes(input, 5) ||
+        !ReadNcmUint32(input, imageLength) || !SkipNcmBytes(input, imageLength))
+    {
+        error = "NCM 元数据不完整。";
+        return false;
+    }
+
+    std::vector<BYTE> box(256);
+    for (size_t i = 0; i < box.size(); ++i)
+        box[i] = static_cast<BYTE>(i);
+    BYTE j = 0;
+    for (size_t i = 0; i < box.size(); ++i)
+    {
+        j = static_cast<BYTE>(j + box[i] + audioKey[i % audioKey.size()]);
+        std::swap(box[i], box[j]);
+    }
+
+    std::ofstream output(decoded, std::ios::binary | std::ios::trunc);
+    if (!output)
+    {
+        error = "无法创建临时解密文件。";
+        return false;
+    }
+    std::vector<BYTE> buffer(64 * 1024);
+    size_t offset = 0;
+    while (input.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(buffer.size())) || input.gcount() > 0)
+    {
+        const size_t length = static_cast<size_t>(input.gcount());
+        for (size_t i = 0; i < length; ++i, ++offset)
+        {
+            const BYTE index = static_cast<BYTE>(offset + 1);
+            buffer[i] ^= box[static_cast<BYTE>(box[index] + box[static_cast<BYTE>(box[index] + index)])];
+        }
+        output.write(reinterpret_cast<const char*>(buffer.data()), static_cast<std::streamsize>(length));
+    }
+    if (input.bad() || !output.good())
+    {
+        error = "解密音频数据失败。";
+        return false;
+    }
+    return true;
 }
 
 // 探测视频编码格式
@@ -8309,10 +8435,65 @@ void MediaToolsMenu()
             }
 
             case 28:
+            {
+                ClearScreen();
+                std::cout << "========== 网易云 NCM 转 MP3 ==========\n";
+                std::string src = GetInput("输入 NCM 文件: ");
+                std::string dst = GetInput("输出 MP3（留空则保存在原文件旁）: ");
+                if (src.empty()) { Pause(); break; }
+
+                std::filesystem::path source = std::filesystem::u8path(src);
+                if (source.extension() != ".ncm" && source.extension() != ".NCM")
+                {
+                    std::cout << "请选择 .ncm 文件。\n";
+                    Pause();
+                    break;
+                }
+                std::filesystem::path destination = dst.empty() ? source : std::filesystem::u8path(dst);
+                destination.replace_extension(".mp3");
+                std::filesystem::path decoded = destination;
+                decoded += ".ncm-decoded-" + std::to_string(GetCurrentProcessId());
+                std::filesystem::path encoded = destination;
+                encoded += ".ncm-converting-" + std::to_string(GetCurrentProcessId()) + ".mp3";
+                std::error_code ec;
+                std::filesystem::remove(decoded, ec);
+                std::filesystem::remove(encoded, ec);
+
+                std::string error;
+                if (!DecodeNcmAudio(source, decoded, error))
+                {
+                    std::filesystem::remove(decoded, ec);
+                    std::cout << "[错误] " << error << "\n";
+                    Pause();
+                    break;
+                }
+                bool converted = RunFFmpeg("ffmpeg -v error -i \"" + decoded.u8string() +
+                                           "\" -vn -c:a libmp3lame -q:a 2 -y \"" + encoded.u8string() + "\"");
+                std::filesystem::remove(decoded, ec);
+                if (!converted || !std::filesystem::exists(encoded, ec) || std::filesystem::file_size(encoded, ec) == 0)
+                {
+                    std::filesystem::remove(encoded, ec);
+                    std::cout << "[错误] MP3 转码失败，请确认 FFmpeg 已安装且文件完整。\n";
+                    Pause();
+                    break;
+                }
+                std::filesystem::remove(destination, ec);
+                std::filesystem::rename(encoded, destination, ec);
+                if (ec)
+                {
+                    std::filesystem::remove(encoded, ec);
+                    std::cout << "[错误] 无法保存输出文件。\n";
+                }
+                else
+                    std::cout << "[完成] 已生成 MP3: " << destination.u8string() << "\n";
+                Pause();
+                break;
+            }
+
             case 29:
             {
                 ClearScreen();
-                std::cout << "========== 加密音乐格式解密 ==========\n";
+                std::cout << "========== 通用加密音乐格式 ==========\n";
                 std::cout << "推荐工具: unlock-music\n";
                 std::cout << "支持: NCM / QMC / KGM / KWm / XM / MG\n\n";
                 std::cout << "GitHub: https://github.com/unlock-music/unlock-music\n\n";

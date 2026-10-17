@@ -27,6 +27,67 @@ void WriteFile(const std::filesystem::path &path, const std::string &content)
     assert(out.good());
 }
 
+std::vector<BYTE> EncryptNcmKeyForTest(std::vector<BYTE> plain)
+{
+    const BYTE coreKey[] = "#14ljk_!\\]&0U<'(";
+    struct KeyBlob
+    {
+        BLOBHEADER header;
+        DWORD length;
+        BYTE key[sizeof(coreKey) - 1];
+    } keyBlob = {{PLAINTEXTKEYBLOB, CUR_BLOB_VERSION, 0, CALG_AES_128}, sizeof(coreKey) - 1, {}};
+    memcpy(keyBlob.key, coreKey, sizeof(keyBlob.key));
+    HCRYPTPROV provider = 0;
+    HCRYPTKEY key = 0;
+    assert(CryptAcquireContextW(&provider, nullptr, nullptr, PROV_RSA_AES, CRYPT_VERIFYCONTEXT));
+    assert(CryptImportKey(provider, reinterpret_cast<const BYTE *>(&keyBlob), sizeof(keyBlob), 0, 0, &key));
+    DWORD mode = CRYPT_MODE_ECB;
+    assert(CryptSetKeyParam(key, KP_MODE, reinterpret_cast<BYTE *>(&mode), 0));
+    DWORD length = static_cast<DWORD>(plain.size());
+    plain.resize(plain.size() + 16);
+    assert(CryptEncrypt(key, 0, TRUE, 0, plain.data(), &length, static_cast<DWORD>(plain.size())));
+    plain.resize(length);
+    CryptDestroyKey(key);
+    CryptReleaseContext(provider, 0);
+    return plain;
+}
+
+void WriteNcmFixture(const std::filesystem::path &path, const std::string &audio)
+{
+    std::vector<BYTE> key{'n', 'e', 't', 'e', 'a', 's', 'e', 'c', 'l', 'o', 'u', 'd', 'm', 'u', 's', 'i', 'c',
+                          'f', 'i', 'x', 't', 'u', 'r', 'e'};
+    std::vector<BYTE> encryptedKey = EncryptNcmKeyForTest(key);
+    for (BYTE &byte : encryptedKey)
+        byte ^= 0x64;
+    std::vector<BYTE> box(256);
+    for (size_t i = 0; i < box.size(); ++i)
+        box[i] = static_cast<BYTE>(i);
+    BYTE j = 0;
+    for (size_t i = 0; i < box.size(); ++i)
+    {
+        j = static_cast<BYTE>(j + box[i] + key[17 + i % (key.size() - 17)]);
+        std::swap(box[i], box[j]);
+    }
+    std::vector<BYTE> encryptedAudio(audio.begin(), audio.end());
+    for (size_t i = 0; i < encryptedAudio.size(); ++i)
+    {
+        const BYTE index = static_cast<BYTE>(i + 1);
+        encryptedAudio[i] ^= box[static_cast<BYTE>(box[index] + box[static_cast<BYTE>(box[index] + index)])];
+    }
+    std::ofstream out(path, std::ios::binary);
+    const char magic[] = "CTENFDAM";
+    out.write(magic, 8);
+    out.write("\0\0", 2);
+    auto writeUint32 = [&out](uint32_t value) { out.write(reinterpret_cast<const char *>(&value), sizeof(value)); };
+    writeUint32(static_cast<uint32_t>(encryptedKey.size()));
+    out.write(reinterpret_cast<const char *>(encryptedKey.data()), static_cast<std::streamsize>(encryptedKey.size()));
+    writeUint32(0);
+    out.write("\0\0\0\0\0", 5);
+    writeUint32(0);
+    out.write(reinterpret_cast<const char *>(encryptedAudio.data()), static_cast<std::streamsize>(encryptedAudio.size()));
+    assert(out.good());
+}
+
 int main()
 {
     std::istringstream input("\n42\n -7 \n12abc\n99999999999999999999999\nabc\n\n");
@@ -52,6 +113,15 @@ int main()
     assert(GetFileSHA256(source.u8string()) == "CDC76E5C9914FB9281A1C7E284D73E67F1809A48A497200E046D39CCC7112CD0");
     assert(GetFileSHA256((root / "missing").u8string()).empty());
     assert(GetLocalExeHash().size() == 64);
+
+    auto ncmSource = root / "fixture.ncm";
+    auto ncmOutput = root / "fixture.audio";
+    WriteNcmFixture(ncmSource, "ID3fixture-audio");
+    std::string ncmError;
+    assert(DecodeNcmAudio(ncmSource, ncmOutput, ncmError));
+    assert(ReadFile(ncmOutput) == "ID3fixture-audio");
+    WriteFile(ncmSource, "not-ncm");
+    assert(!DecodeNcmAudio(ncmSource, ncmOutput, ncmError));
 
     assert(StringToBase(std::string("\0\xFF", 2), 2, " ") == "00000000 11111111");
     assert(StringToBase("AB", 8, " ") == "101 102");
