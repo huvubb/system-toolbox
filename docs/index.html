@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>System Toolbox v1.9 · 免费开源 Windows 系统工具箱</title>
+<meta name="description" content="Windows 10/11 系统工具箱：后台任务队列、winget 安装与 PATH 刷新、fastdl 高速下载、音乐转 MP3、DiskTool DLC、镜像与卷挂载。免费开源。">
+<meta property="og:title" content="System Toolbox v1.9 · Windows 系统工具箱">
+<meta property="og:description" content="后台安装、多队列、高速下载、音频转换与磁盘管理，集中到一个开源工具箱。">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://huvubb.github.io/system-toolbox/">
+<link rel="canonical" href="https://huvubb.github.io/system-toolbox/">
+<style>
+body{margin:0;background:#10151e;color:#e8edf5;font:18px/1.7 system-ui,sans-serif}main{max-width:950px;margin:auto;padding:72px 24px}h1{font-size:clamp(36px,7vw,64px);line-height:1.15;margin:16px 0}h2{font-size:24px}p{color:#bfcbdc}a{color:#9ed5ff}a:focus-visible{outline:3px solid #fff;outline-offset:5px}.tag{color:#84e2ba}.button{display:inline-block;background:#9ed5ff;color:#10151e;padding:12px 22px;border-radius:10px;text-decoration:none;font-weight:700;margin:10px 16px 10px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:20px;margin:42px 0}article{background:#1a2432;padding:22px;border-radius:14px}article p{margin-bottom:0}footer{border-top:1px solid #344152;padding-top:24px;font-size:15px}
+</style>
+<main>
+<span class="tag">免费开源 · Windows 10 / 11 · v1.9</span>
+<h1>常用系统操作，<br>集中到一个工具箱。</h1>
+<p>System Toolbox 将维护、安装、下载、音乐转换和磁盘管理集中在同一个控制台入口。后台队列让独立任务运行时，你还能继续操作。</p>
+<a class="button" href="https://github.com/huvubb/system-toolbox/releases/download/v1.9/system-toolbox-windows.zip">下载 v1.9 完整包</a>
+<a href="https://github.com/huvubb/system-toolbox">查看源码与使用说明 ↗</a>
+<div class="grid">
+<article><h2>安装不用一直等</h2><p>winget 等独立命令可加入后台队列；支持并发、优先级、暂停、继续和独立日志。安装后刷新常用开发工具的 PATH。</p></article>
+<article><h2>下载与音频处理</h2><p>集成 fastdl 多线程和断点下载；支持 NCM、QMC、KGM、KWM 等常见音乐文件转 MP3，转码需要 FFmpeg。</p></article>
+<article><h2>磁盘工具按需装载</h2><p>DiskTool DLC 下载后校验；提供 ISO/VHD/VHDX 与卷挂载入口。开机磁盘检查设置仅作用于选择的卷。</p></article>
+</div>
+<h2>解压完整包后运行</h2>
+<p>保留同目录的三个 EXE：主程序、music-converter 和 fastdl。系统维护功能需要管理员权限。发行页提供 SHA256 校验清单；程序按 EXE 哈希检查更新。</p>
+<p>部分音乐文件需要对应密钥，新版厂商格式可能不兼容。磁盘写入和修复前请备份重要数据。DiskTool 的部分功能需要配套资源。</p>
+<p><a href="https://github.com/huvubb/system-toolbox/releases/tag/v1.9">完整发行说明与校验清单</a> · <a href="https://github.com/huvubb/system-toolbox/issues">反馈问题或建议</a></p>
+<footer>Open-source Windows maintenance toolbox · C++17/20 · <a href="https://github.com/huvubb/system-toolbox/blob/main/LICENSE">MIT License</a><br>如果它帮到了你，欢迎分享项目链接、提交使用反馈或参与贡献。</footer>
+</main>
+</html>
