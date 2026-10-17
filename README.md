@@ -1,5 +1,6 @@
 # 🧰 多功能系统工具箱
 [![NoLogin Verified](https://nologin.tools/badges/flat-blue.svg)](https://nologin.tools/badge/ "Verified by NoLoginTools.org")
+
 **System Toolbox** —— 免费开源的 Windows 10/11 系统维护工具箱，集成后台任务队列、高速下载、音乐转码和磁盘工具。
 
 [下载 v1.9 完整包](https://github.com/huvubb/system-toolbox/releases/download/v1.9/system-toolbox-windows.zip) · [更新说明与校验清单](https://github.com/huvubb/system-toolbox/releases/tag/v1.9) · [项目介绍](https://huvubb.github.io/system-toolbox/)
