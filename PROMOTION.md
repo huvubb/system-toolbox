@@ -34,3 +34,5 @@ Release: https://github.com/huvubb/system-toolbox/releases/tag/v1.9
 - 第三方社区：以上文案可用于允许作者分享项目的版块；发布前核对该版块规则，披露作者身份，避免重复发帖和无关评论。
 
 传播效果可通过 GitHub 仓库 Insights 的流量、来源和 Release 下载量观察；下载次数不等同于独立用户数。
+
+联系邮箱：810372789@qq.com

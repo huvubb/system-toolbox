@@ -22,3 +22,5 @@
 - 系统维护需要管理员权限，磁盘写入与修复前应备份数据。
 
 源码、详细说明与问题反馈：https://github.com/huvubb/system-toolbox
+
+联系邮箱：810372789@qq.com
