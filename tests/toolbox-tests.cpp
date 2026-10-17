@@ -92,6 +92,16 @@ void WriteNcmFixture(const std::filesystem::path &path, const std::string &audio
 
 int main()
 {
+    DWORD downloadSize = GetEnvironmentVariableW(L"TOOLBOX_TEST_DOWNLOAD_URL", nullptr, 0);
+    if (downloadSize)
+    {
+        std::vector<wchar_t> url(downloadSize), output(32768);
+        GetEnvironmentVariableW(L"TOOLBOX_TEST_DOWNLOAD_URL", url.data(), downloadSize);
+        DWORD size = GetEnvironmentVariableW(L"TOOLBOX_TEST_DOWNLOAD_OUTPUT", output.data(), static_cast<DWORD>(output.size()));
+        assert(size && size < output.size());
+        return DownloadWithFastdl(std::filesystem::path(url.data()).u8string(),
+                                  std::filesystem::path(output.data()).u8string()) ? 0 : 1;
+    }
     DWORD musicInputSize = GetEnvironmentVariableW(L"TOOLBOX_TEST_MUSIC_INPUT", nullptr, 0);
     if (musicInputSize)
     {
@@ -104,12 +114,15 @@ int main()
                                  std::filesystem::path(musicOutput.data()).u8string(), "", "") ? 0 : 1;
     }
     std::wstring path = L"C:\\Tools;C:\\Node";
-    int comparison = 99;
-    assert(CompareReleaseVersions("v1.8", "1.8.0", comparison) && comparison == 0);
-    assert(CompareReleaseVersions("v1.9", "v1.10", comparison) && comparison == -1);
-    assert(CompareReleaseVersions("v2.0", "v1.99", comparison) && comparison == 1);
-    assert(!CompareReleaseVersions("v1.8", "v1.9-beta", comparison));
-    assert(!CompareReleaseVersions("v1.8", "v1.9.", comparison));
+    const std::string manifestHash(64, 'a');
+    std::istringstream validManifest(manifestHash + "  system-toolbox.exe\r\n");
+    assert(ReadToolboxManifestHash(validManifest) == std::string(64, 'A'));
+    for (const auto& manifest : std::vector<std::string>{manifestHash + "  fastdl.exe\n", "bad  system-toolbox.exe\n",
+                                manifestHash + " system-toolbox.exe\n" + manifestHash + " system-toolbox.exe\n"})
+    {
+        std::istringstream inputManifest(manifest);
+        assert(ReadToolboxManifestHash(inputManifest).empty());
+    }
     {
         TaskQueue queue;
         { std::lock_guard<std::mutex> lock(queue.mutex); queue.parallel = 0; }
@@ -178,6 +191,22 @@ int main()
     assert(GetFileSHA256(source.u8string()) == "CDC76E5C9914FB9281A1C7E284D73E67F1809A48A497200E046D39CCC7112CD0");
     assert(GetFileSHA256((root / "missing").u8string()).empty());
     assert(GetLocalExeHash().size() == 64);
+    assert(GetBuildIdentity() == "SHA256 " + GetLocalExeHash().substr(0, 12));
+    auto archive = root / "中文 O'Brien & release.zip";
+    auto archivedExe = root / "system-toolbox.exe";
+    WriteFile(archivedExe, "abc");
+    assert(RunPowerShellFile("param([string]$Source,[string]$Zip)\n$ErrorActionPreference='Stop'\n"
+                            "Compress-Archive -LiteralPath $Source -DestinationPath $Zip -Force\n",
+                            {archivedExe.wstring(), archive.wstring()}));
+    assert(GetRemoteExeHash(archive.u8string()) == GetFileSHA256(archivedExe.u8string()));
+    auto installDirectory = root / "install";
+    assert(std::filesystem::create_directory(installDirectory));
+    auto installedExe = installDirectory / "system-toolbox.exe";
+    WriteFile(installedExe, "preserved executable");
+    assert(!RunPowerShellFile(GetUpdateInstallScript(), {L"2147483647", archive.wstring(),
+                                                       installedExe.wstring(), std::wstring(64, L'0')}));
+    assert(ReadFile(installedExe) == "preserved executable");
+    assert(std::filesystem::exists(root / "update-error.txt"));
 
     auto ncmSource = root / "fixture.ncm";
     auto ncmOutput = root / "fixture.audio";
@@ -252,12 +281,15 @@ int main()
     auto versionPath = std::filesystem::u8path(GetLastVersionFile());
     bool hadVersion = std::filesystem::exists(versionPath);
     std::string savedVersion = hadVersion ? ReadFile(versionPath) : "";
-    WriteFile(versionPath, "old-version");
+    WriteFile(versionPath, std::string(64, '0'));
     assert(CheckJustUpdated());
     g_bOnlineMode = false;
     ShowUpdateContent();
     assert(!CheckJustUpdated());
-    assert(GetLastVersion() == TOOLBOX_VERSION);
+    assert(GetLastVersion() == GetLocalExeHash());
+    WriteFile(versionPath, "v1.9.0");
+    assert(!CheckJustUpdated());
+    assert(GetLastVersion() == GetLocalExeHash());
 
     for (const std::string choices : {"abc\n0\n", "0\n", ""})
     {

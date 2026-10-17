@@ -5,7 +5,7 @@
 [![C++](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
 [![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6.svg)](https://www.microsoft.com/windows)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-1.0.1-orange.svg)](https://github.com/huvubb/system-toolbox/releases)
+[![Build](https://img.shields.io/badge/Build-SHA256-orange.svg)](https://github.com/huvubb/system-toolbox/releases)
 
 ---
 
@@ -100,4 +100,10 @@ ctest --test-dir build --output-on-failure
 
 主菜单 31 可开启后台提交；后续独立系统命令、普通 FFmpeg 操作、多平台音乐转换会进入队列，菜单可继续操作。默认并发 2，支持 1–8 个并发任务、低/普通/高优先级、暂停/继续及独立日志。等待任务按优先级和提交顺序调度，运行任务及其子进程同步控制。依赖中间文件的智能流水线、内置计算、交互式命令仍在前台运行。后台任务没有交互输入，请只提交无需输入的操作；退出工具箱会结束未完成任务，暂停安装或系统维护可能持续占用资源。
 
-更新检查比较程序内置版本与 GitHub 正式发布标签，支持 `v1.8` 与 `1.8.0` 等价，按数字比较 `1.10` 与 `1.9`，不将不同编译产生的哈希差异误判为版本升级，也不自动降级。无法识别的标签会提示手动检查。
+程序标识自动来自本地 EXE 的 SHA256，无需在源码中维护版本号。更新检查获取 GitHub 最新发布：若附件含 `SHA256SUMS.txt`，先比较其中的程序哈希；旧发布没有清单时，下载 ZIP 后计算其中唯一的 `system-toolbox.exe` 哈希。相同则无需更新，不同则显示发布说明并询问是否替换；哈希只能判断文件是否相同，无法判断新旧。清单与下载内容不符时拒绝安装。启动记录也改为保存程序哈希，旧版数字记录会自动迁移。
+
+### fastdl 高速下载
+
+已集成 `D:\fastdl` 的源码，来源见 [fastdl-integration/UPSTREAM.md](fastdl-integration/UPSTREAM.md)。主菜单 32 提供文件下载及完整 fastdl 菜单（含 ed2k）；网络工具的下载、PsExec 下载和更新附件下载也使用 fastdl。普通文件下载可按主菜单 31 的设置进入后台队列，更新下载保持前台等待，以完成哈希校验。下载支持多线程和断点数据，失败不会覆盖已有目标文件。
+
+完整包包含 `fastdl.exe`，放在工具箱旁；源码运行需安装 `fastdl-integration/requirements.txt`。构建流程自动生成 `system-toolbox-windows.zip` 和 `SHA256SUMS.txt`，发布时将两者附到同一 GitHub Release 即可。更新安装会同步复制附件中的音乐转换器和 fastdl，保留旧文件备份；有后台任务时先完成任务再安装更新。

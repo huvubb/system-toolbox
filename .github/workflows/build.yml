@@ -49,6 +49,25 @@ jobs:
           $env:TOOLBOX_TEST_EXECUTABLE = (Resolve-Path build/Release/toolbox-tests.exe).Path
           python -m pytest music-converter/tests/test_cli.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test and package fastdl and update hashes
+        if: matrix.compiler == 'msvc'
+        shell: pwsh
+        run: |
+          python -m pip install -r fastdl-integration/requirements.txt
+          python -m pytest fastdl-integration/tests -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m PyInstaller --noconfirm --onefile --name fastdl --add-data "fastdl-integration/servers.txt;." --distpath build/Release fastdl-integration/dl.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item fastdl-integration/LICENSE build/Release/FASTDL-LICENSE.txt
+          Copy-Item fastdl-integration/UPSTREAM.md build/Release/FASTDL-NOTICE.md
+          $env:FASTDL_EXECUTABLE = (Resolve-Path build/Release/fastdl.exe).Path
+          $env:TOOLBOX_TEST_EXECUTABLE = (Resolve-Path build/Release/toolbox-tests.exe).Path
+          python -m pytest fastdl-integration/tests -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $names = @('system-toolbox.exe','music-converter.exe','fastdl.exe','MUSIC-CONVERTER-LICENSE.txt','MUSIC-CONVERTER-NOTICE.md','FASTDL-LICENSE.txt','FASTDL-NOTICE.md')
+          $hashes = $names | ForEach-Object { $hash = Get-FileHash -LiteralPath "build/Release/$_" -Algorithm SHA256; "$($hash.Hash)  $_" }
+          $hashes | Set-Content build/Release/SHA256SUMS.txt -Encoding ascii
+          Compress-Archive -Path ($names | ForEach-Object { "build/Release/$_" }) -DestinationPath build/Release/system-toolbox-windows.zip -Force
       - uses: actions/upload-artifact@v4
         if: matrix.compiler == 'msvc'
         with:
@@ -58,3 +77,8 @@ jobs:
             build/Release/music-converter.exe
             build/Release/MUSIC-CONVERTER-LICENSE.txt
             build/Release/MUSIC-CONVERTER-NOTICE.md
+            build/Release/fastdl.exe
+            build/Release/FASTDL-LICENSE.txt
+            build/Release/FASTDL-NOTICE.md
+            build/Release/SHA256SUMS.txt
+            build/Release/system-toolbox-windows.zip

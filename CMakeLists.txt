@@ -14,6 +14,8 @@ include(CTest)
 add_executable(system-toolbox system-toolbox.cpp)
 add_custom_command(TARGET system-toolbox POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/fastdl-integration" "$<TARGET_FILE_DIR:system-toolbox>/fastdl-integration"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_SOURCE_DIR}/music-converter/music_unlock" "$<TARGET_FILE_DIR:system-toolbox>/music-converter/music_unlock"
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_SOURCE_DIR}/music-converter/assets" "$<TARGET_FILE_DIR:system-toolbox>/music-converter/assets"

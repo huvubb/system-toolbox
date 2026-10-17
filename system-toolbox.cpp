@@ -1,10 +1,10 @@
-// 多功能系统工具箱 v2.7
+// 多功能系统工具箱（构建标识由程序 SHA256 自动生成）
 // 编译环境：Visual Studio 2019/2022 或 MinGW-w64，Windows 10/11
 // 注意：请将本文件保存为 UTF-8 with BOM 格式，避免中文乱码
 // 运行需要管理员权限，部分操作有风险，使用前请阅读免责声明
 
 // ==================== 版本信息 ====================
-#define TOOLBOX_VERSION "v1.9.0"
+#define TOOLBOX_VERSION GetBuildIdentity()
 #define GITHUB_REPO "huvubb/system-toolbox"
 #define GITHUB_API_URL "https://api.github.com/repos/huvubb/system-toolbox/releases/latest"
 #define GITHUB_RELEASE_URL "https://github.com/huvubb/system-toolbox/releases"
@@ -26,6 +26,7 @@ bool g_bModeInitialized = false;
 #include <vector>
 #include <cstdlib>
 #include <cstring>
+#include <cctype>
 #include <sstream>
 #include <algorithm>
 #include <iomanip>
@@ -59,6 +60,7 @@ bool g_bModeInitialized = false;
 // ====================================================================
 // 基础工具函数
 // ====================================================================
+std::string GetBuildIdentity();
 
 // 控制台代码页设置为 UTF-8
 void SetUtf8Console()
@@ -350,7 +352,10 @@ void ExtractZip();
 
 //update
 void SoftwareUpdate();
-bool GetLatestReleaseInfo(std::string& tagName, std::string& downloadUrl, std::string& body);
+bool GetLatestReleaseInfo(std::string& tagName, std::string& downloadUrl, std::string& body, std::string* manifestUrl = nullptr);
+std::wstring QuoteProcessArgument(const std::wstring& argument);
+bool DownloadWithFastdl(const std::string& url, const std::string& destination, bool background = false);
+void FastdlMenu();
 std::string GetFileSHA256(const std::string& filePath);
 std::string GetLocalExeHash();
 std::string GetRemoteExeHash(const std::string& zipPath);
@@ -677,6 +682,7 @@ int main()
 
         std::cout << "----------------------------------------\n";
         std::cout << "31. 后台任务队列控制\n";
+        std::cout << "32. fastdl 高速下载器\n";
         std::cout << "90. 切换在线/离线模式\n";
         std::cout << " 0. 退出程序\n";
         std::cout << "========================================\n";
@@ -688,7 +694,7 @@ int main()
         if (!g_bOnlineMode)
         {
             if (choice == 2 || choice == 5 || choice == 6 || choice == 15 ||
-                choice == 19 || choice == 20 || choice == 25)
+                choice == 19 || choice == 20 || choice == 25 || choice == 32)
             {
                 ClearScreen();
                 std::cout << "========== 功能不可用 ==========\n";
@@ -733,6 +739,7 @@ int main()
             case 29: BaseConverterMenu(); break;
             case 30: ChkdskControlMenu(); break;
             case 31: TaskQueueMenu(); RefreshEnvironmentPath(); break;
+            case 32: FastdlMenu(); break;
 
             case 90:  // 切换模式
                 ToggleMode();
@@ -3839,9 +3846,7 @@ else if (choice == 8)
         else if (choice == 16)
         {
             std::cout << "正在下载 PsExec64.exe..." << std::endl;
-            std::string downloadCmd = "powershell -Command \"Invoke-WebRequest -Uri 'https://live.sysinternals.com/PsExec64.exe' -OutFile 'PsExec64.exe'\"";
-            int ret = system(downloadCmd.c_str());
-            if (ret == 0)
+            if (DownloadWithFastdl("https://live.sysinternals.com/PsExec64.exe", "PsExec64.exe"))
                 std::cout << "下载成功！" << std::endl;
             else
                 std::cout << "下载失败！请手动从 https://live.sysinternals.com/PsExec64.exe 下载" << std::endl;
@@ -5246,7 +5251,7 @@ void NetworkToolsMenu()
         std::cout << "23. 打开防火墙\n";
         std::cout << "24. 关闭防火墙\n";
         std::cout << "\n=== 下载与测速 ===\n";
-        std::cout << "25. 下载文件（curl）\n";
+        std::cout << "25. 下载文件（fastdl 高速下载）\n";
         std::cout << "26. 测试网速（speedtest）\n";
         std::cout << "27. 查看外网 IP\n";
         std::cout << "\n 0. 返回主菜单\n";
@@ -5482,8 +5487,8 @@ void NetworkToolsMenu()
                 std::string savePath = GetInput("请输入保存路径: ");
                 if (!url.empty() && !savePath.empty())
                 {
-                    std::string cmd = "curl -L -o \"" + savePath + "\" \"" + url + "\"";
-                    RunCmd(cmd);
+                    if (!DownloadWithFastdl(url, savePath, GetTaskQueue().enabled))
+                        std::cout << "下载失败，原文件保留。\n";
                 }
                 Pause();
                 break;
@@ -7332,6 +7337,105 @@ case 15:
 
 // ==================== 软件更新 ====================
 
+bool RunProcessArguments(const std::vector<std::wstring>& arguments, bool background = false)
+{
+    std::wstring command;
+    for (const auto& argument : arguments)
+    {
+        if (!command.empty()) command += L' ';
+        command += QuoteProcessArgument(argument);
+    }
+    if (background)
+    {
+        int id = GetTaskQueue().Add(command);
+        std::cout << "后台下载任务 ID: " << id << "\n";
+        return id != 0;
+    }
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process))
+        return false;
+    WaitForSingleObject(process.hProcess, INFINITE);
+    DWORD result = 1;
+    GetExitCodeProcess(process.hProcess, &result);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return result == 0;
+}
+
+std::vector<std::wstring> GetFastdlArguments()
+{
+    std::vector<wchar_t> module(32768);
+    DWORD length = GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
+    if (!length || length >= module.size()) return {};
+    auto directory = std::filesystem::path(module.data()).parent_path();
+    std::error_code error;
+    auto binary = directory / L"fastdl.exe";
+    if (std::filesystem::is_regular_file(binary, error)) return {binary.wstring()};
+    auto script = directory / L"fastdl-integration" / L"dl.py";
+    if (std::filesystem::is_regular_file(script, error)) return {L"python.exe", L"-X", L"utf8", script.wstring()};
+    return {};
+}
+
+bool DownloadWithFastdl(const std::string& url, const std::string& destination, bool background)
+{
+    if (url.rfind("https://", 0) != 0 && url.rfind("http://", 0) != 0 && url.rfind("ftp://", 0) != 0)
+    {
+        std::cout << "不支持的下载协议。\n";
+        return false;
+    }
+    auto arguments = GetFastdlArguments();
+    if (arguments.empty())
+    {
+        std::cout << "缺少 fastdl 组件，请使用完整工具箱安装包。\n";
+        return false;
+    }
+    std::error_code error;
+    auto output = std::filesystem::absolute(std::filesystem::u8path(destination), error);
+    if (error || destination.empty()) return false;
+    arguments.insert(arguments.end(), {L"toolbox-download", Utf8Command(url), output.wstring()});
+    return RunProcessArguments(arguments, background);
+}
+
+void FastdlMenu()
+{
+    std::cout << "\n=== fastdl 高速下载器 ===\n1. 下载文件（支持后台队列）\n2. 打开完整下载器菜单（含 ed2k）\n";
+    int choice = GetIntInput("请选择: ");
+    if (choice == 1)
+    {
+        std::string url = GetInput("下载 URL: ");
+        std::string output = GetInput("保存文件完整路径: ");
+        if (output.size() >= 2 && output.front() == '"' && output.back() == '"') output = output.substr(1, output.size()-2);
+        if (!url.empty() && !output.empty() && !DownloadWithFastdl(url, output, GetTaskQueue().enabled))
+            std::cout << "下载失败，原目标文件保留，重试可续传。\n";
+    }
+    else if (choice == 2)
+    {
+        auto arguments = GetFastdlArguments();
+        if (arguments.empty() || !RunProcessArguments(arguments)) std::cout << "无法启动 fastdl 组件。\n";
+    }
+    Pause();
+}
+
+bool RunPowerShellFile(const std::string& script, const std::vector<std::wstring>& parameters)
+{
+    wchar_t directory[MAX_PATH], file[MAX_PATH];
+    DWORD length = GetTempPathW(MAX_PATH, directory);
+    if (!length || length >= MAX_PATH || !GetTempFileNameW(directory, L"stb", 0, file)) return false;
+    std::filesystem::path scriptPath = std::wstring(file) + L".ps1";
+    DeleteFileW(file);
+    std::ofstream output(scriptPath, std::ios::binary);
+    output << "\xEF\xBB\xBF" << script;
+    output.close();
+    if (!output) { DeleteFileW(scriptPath.c_str()); return false; }
+    std::vector<std::wstring> arguments{L"powershell.exe", L"-NoProfile", L"-NonInteractive", L"-ExecutionPolicy", L"Bypass", L"-File", scriptPath.wstring()};
+    arguments.insert(arguments.end(), parameters.begin(), parameters.end());
+    bool result = RunProcessArguments(arguments);
+    DeleteFileW(scriptPath.c_str());
+    return result;
+}
+
 // 保存/读取上次运行的版本
 
 // 获取本地 exe 的 SHA256
@@ -7344,51 +7448,34 @@ std::string GetLocalExeHash()
     return GetFileSHA256(std::filesystem::path(exePath).u8string());
 }
 
+std::string GetBuildIdentity()
+{
+    static const std::string hash = GetLocalExeHash();
+    return hash.empty() ? "SHA256 unavailable" : "SHA256 " + hash.substr(0, 12);
+}
+
 // 获取 zip 中 exe 的 SHA256
 std::string GetRemoteExeHash(const std::string& zipPath)
 {
-    char tempPath[MAX_PATH];
-    GetTempPathA(MAX_PATH, tempPath);
-    std::string extractDir = std::string(tempPath) + "toolbox_check";
-
-    std::string cleanCmd = "rmdir /s /q \"" + extractDir + "\" >nul 2>&1";
-    system(cleanCmd.c_str());
-
-    std::string extractCmd = "powershell -Command \""
-        "$ProgressPreference='SilentlyContinue';"
-        "Expand-Archive -Path '" + zipPath + "' -DestinationPath '" + extractDir + "' -Force\"";
-    system(extractCmd.c_str());
-
-    std::string listFile = "C:\\toolbox_exe_path.txt";
-    DeleteFileA(listFile.c_str());
-
-    std::string findCmd = "dir /s /b \"" + extractDir + "\\system-toolbox.exe\" > \"" + listFile + "\" 2>nul";
-    system(findCmd.c_str());
-
-    std::string exePath;
-    std::ifstream f(listFile);
-    if (f.is_open())
-    {
-        std::getline(f, exePath);
-        f.close();
-    }
-    DeleteFileA(listFile.c_str());
-
-    while (!exePath.empty() && (exePath.front() == ' ' || exePath.front() == '\t')) exePath.erase(exePath.begin());
-    while (!exePath.empty() && (exePath.back() == ' ' || exePath.back() == '\t' || exePath.back() == '\r')) exePath.pop_back();
-
-    if (exePath.empty())
-    {
-        std::cout << "无法在 zip 中找到 system-toolbox.exe" << std::endl;
-        return "";
-    }
-
-    std::cout << "找到 exe: " << exePath << std::endl;
-    std::string hash = GetFileSHA256(exePath);
-
-    std::string cleanCmd2 = "rmdir /s /q \"" + extractDir + "\" >nul 2>&1";
-    system(cleanCmd2.c_str());
-
+    wchar_t directory[MAX_PATH], result[MAX_PATH];
+    DWORD length = GetTempPathW(MAX_PATH, directory);
+    if (!length || length >= MAX_PATH || !GetTempFileNameW(directory, L"sth", 0, result)) return "";
+    const std::string script =
+        "param([string]$Zip,[string]$Result)\n$ErrorActionPreference='Stop'\n"
+        "Add-Type -AssemblyName System.IO.Compression.FileSystem\n"
+        "$archive=[IO.Compression.ZipFile]::OpenRead($Zip)\n"
+        "try { $entries=@($archive.Entries | Where-Object { $_.Name -eq 'system-toolbox.exe' });"
+        "if ($entries.Count -ne 1) { throw 'Expected exactly one toolbox executable' };"
+        "$stream=$entries[0].Open(); $sha=[Security.Cryptography.SHA256]::Create();"
+        "try { $hash=[BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','');"
+        "[IO.File]::WriteAllText($Result,$hash) } finally { $sha.Dispose();$stream.Dispose() }"
+        "} finally { $archive.Dispose() }\n";
+    bool ok = RunPowerShellFile(script, {std::filesystem::u8path(zipPath).wstring(), result});
+    std::ifstream input{std::filesystem::path(result)};
+    std::string hash;
+    if (ok) std::getline(input, hash);
+    input.close();
+    DeleteFileW(result);
     return hash;
 }
 
@@ -7423,17 +7510,18 @@ void SaveCurrentVersion()
     std::ofstream f(std::filesystem::u8path(file));
     if (f.is_open())
     {
-        f << TOOLBOX_VERSION;
+        f << GetLocalExeHash();
         f.close();
     }
 }
 
 // 获取 GitHub 最新版本信息（不用 irm，用 Invoke-WebRequest）
-bool GetLatestReleaseInfo(std::string &tagName, std::string &downloadUrl, std::string &body)
+bool GetLatestReleaseInfo(std::string &tagName, std::string &downloadUrl, std::string &body, std::string* manifestUrl)
 {
     tagName.clear();
     downloadUrl.clear();
     body.clear();
+    if (manifestUrl) manifestUrl->clear();
     wchar_t tempPath[MAX_PATH], outputPath[MAX_PATH];
     DWORD length = GetTempPathW(MAX_PATH, tempPath);
     if (!length || length >= MAX_PATH || !GetTempFileNameW(tempPath, L"stb", 0, outputPath))
@@ -7452,13 +7540,16 @@ bool GetLatestReleaseInfo(std::string &tagName, std::string &downloadUrl, std::s
         "$r=Invoke-RestMethod -Uri '" GITHUB_API_URL "' -Headers @{'User-Agent'='System-Toolbox'} -TimeoutSec 30;"
         "if ([string]::IsNullOrWhiteSpace($r.tag_name)) { throw 'Missing release tag' };"
         "$asset=$r.assets | Where-Object { $_.name -like '*.zip' } | Select-Object -First 1;"
-        "$data=[string]$r.tag_name+[char]10+[string]$asset.browser_download_url+[char]10+[string]$r.body;"
+        "$manifest=$r.assets | Where-Object { $_.name -eq 'SHA256SUMS.txt' } | Select-Object -First 1;"
+        "$data=[string]$r.tag_name+[char]10+[string]$asset.browser_download_url+[char]10+[string]$manifest.browser_download_url+[char]10+[string]$r.body;"
         "[IO.File]::WriteAllText($env:TOOLBOX_RELEASE_OUTPUT,$data,(New-Object Text.UTF8Encoding $false))\"";
     std::cout << "正在检查最新版本...\n";
     int status = system(cmd.c_str());
     SetEnvironmentVariableW(L"TOOLBOX_RELEASE_OUTPUT", nullptr);
     std::ifstream file(std::filesystem::path(outputPath), std::ios::binary);
-    bool ok = status == 0 && std::getline(file, tagName) && std::getline(file, downloadUrl);
+    std::string manifest;
+    bool ok = status == 0 && std::getline(file, tagName) && std::getline(file, downloadUrl) && std::getline(file, manifest);
+    if (ok && manifestUrl) *manifestUrl = manifest;
     if (ok)
     {
         std::ostringstream contents;
@@ -7482,14 +7573,14 @@ bool CheckJustUpdated()
     std::string lastVer = GetLastVersion();
     
     // 如果没有 last_version.txt，说明是首次运行或旧版本，不显示更新内容
-    if (lastVer.empty())
+    if (lastVer.size() != 64)
     {
         SaveCurrentVersion();
         return false;
     }
     
     // 如果 last_version.txt 和当前版本不同，说明刚更新过
-    if (lastVer != TOOLBOX_VERSION)
+    if (!GetLocalExeHash().empty() && lastVer != GetLocalExeHash())
     {
         return true;
     }
@@ -7531,34 +7622,83 @@ void ShowUpdateContent()
 // 保存当前哈希
 
 
-bool ParseReleaseVersion(std::string text, std::vector<unsigned long long>& parts)
+std::string ReadToolboxManifestHash(std::istream& input)
 {
-    parts.clear();
-    if (!text.empty() && (text[0] == 'v' || text[0] == 'V')) text.erase(0, 1);
-    if (text.empty()) return false;
-    std::istringstream input(text);
-    std::string item;
-    while (std::getline(input, item, '.'))
+    std::string line, found;
+    while (std::getline(input, line))
     {
-        if (item.empty() || item.find_first_not_of("0123456789") != std::string::npos) return false;
-        try { parts.push_back(std::stoull(item)); } catch (...) { return false; }
+        std::istringstream row(line);
+        std::string hash, file, extra;
+        if (!(row >> hash >> file)) continue;
+        if (!file.empty() && file[0] == '*') file.erase(0, 1);
+        if (file != "system-toolbox.exe") continue;
+        if (!found.empty() || (row >> extra) || hash.size() != 64 ||
+            hash.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) return "";
+        std::transform(hash.begin(), hash.end(), hash.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        found = hash;
     }
-    return !parts.empty() && text.back() != '.';
+    return found;
 }
 
-bool CompareReleaseVersions(const std::string& local, const std::string& remote, int& comparison)
+std::string GetUpdateInstallScript()
 {
-    std::vector<unsigned long long> left, right;
-    if (!ParseReleaseVersion(local, left) || !ParseReleaseVersion(remote, right)) return false;
-    size_t size = std::max(left.size(), right.size());
-    left.resize(size); right.resize(size);
-    comparison = left == right ? 0 : left < right ? -1 : 1;
-    return true;
+    return R"PS(param([int]$ParentId,[string]$Zip,[string]$Target,[string]$Hash)
+$ErrorActionPreference='Stop'
+$root=Split-Path -LiteralPath $Target
+$work=Split-Path -LiteralPath $Zip
+$stage=Join-Path $work 'staged'
+$backup=Join-Path $work 'backup'
+$changed=@()
+try {
+    $parent=Get-Process -Id $ParentId -ErrorAction SilentlyContinue
+    if ($parent) { $parent.WaitForExit(60000) | Out-Null; if (!$parent.HasExited) { throw 'Toolbox still running' } }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    New-Item -ItemType Directory -Path $stage,$backup -Force | Out-Null
+    $archive=[IO.Compression.ZipFile]::OpenRead($Zip)
+    try {
+        $names=@('system-toolbox.exe','music-converter.exe','fastdl.exe','PsExec64.exe','README.md','MUSIC-CONVERTER-LICENSE.txt','MUSIC-CONVERTER-NOTICE.md','FASTDL-LICENSE.txt','FASTDL-NOTICE.md')
+        foreach ($name in $names) {
+            $entries=@($archive.Entries | Where-Object { $_.Name -eq $name })
+            if ($entries.Count -gt 1) { throw "Duplicate package entry: $name" }
+            if ($entries.Count -eq 1) { [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0],(Join-Path $stage $name),$true) }
+        }
+    } finally { $archive.Dispose() }
+    $program=Join-Path $stage 'system-toolbox.exe'
+    if ((Get-FileHash -LiteralPath $program -Algorithm SHA256).Hash -ne $Hash) { throw 'Executable hash mismatch' }
+    $files=@(Get-ChildItem -LiteralPath $stage -File | Sort-Object { $_.Name -eq 'system-toolbox.exe' })
+    foreach ($file in $files) {
+        $dest=if ($file.Name -eq 'system-toolbox.exe') { $Target } else { Join-Path $root $file.Name }
+        $saved=Join-Path $backup $file.Name
+        if (Test-Path -LiteralPath $dest) { Copy-Item -LiteralPath $dest -Destination $saved -Force }
+        $changed+=@{Destination=$dest;Backup=$saved}
+        Copy-Item -LiteralPath $file.FullName -Destination $dest -Force
+    }
+    Start-Process -FilePath $Target -WorkingDirectory $root
+} catch {
+    $failure=$_
+    foreach ($item in $changed) {
+        if (Test-Path -LiteralPath $item.Backup) { Copy-Item -LiteralPath $item.Backup -Destination $item.Destination -Force }
+        elseif (Test-Path -LiteralPath $item.Destination) { Remove-Item -LiteralPath $item.Destination -Force }
+    }
+    $failure | Out-String | Set-Content -LiteralPath (Join-Path $work 'update-error.txt') -Encoding UTF8
+    exit 1
+}
+)PS";
 }
 
 // 软件更新主函数
 void SoftwareUpdate()
 {
+    {
+        auto& queue = GetTaskQueue();
+        std::lock_guard<std::mutex> lock(queue.mutex);
+        for (const auto& task : queue.tasks)
+            if (task->state == "running" || task->state == "waiting")
+            {
+                std::cout << "请先完成后台任务再安装更新，以免退出中断任务。\n";
+                Pause(); return;
+            }
+    }
     ClearScreen();
     std::cout << "========== 软件更新 ==========\n";
     std::cout << "当前版本: " << TOOLBOX_VERSION << "\n";
@@ -7574,25 +7714,15 @@ void SoftwareUpdate()
     }
 
     // 获取 GitHub 最新版本信息
-    std::string latestVersion, downloadUrl, body;
-    if (!GetLatestReleaseInfo(latestVersion, downloadUrl, body))
+    std::string latestVersion, downloadUrl, body, manifestUrl;
+    if (!GetLatestReleaseInfo(latestVersion, downloadUrl, body, &manifestUrl))
     {
         Pause();
         return;
     }
 
     std::cout << "GitHub 最新版本: " << latestVersion << "\n";
-    int comparison = 0;
-    if (!CompareReleaseVersions(TOOLBOX_VERSION, latestVersion, comparison))
-    {
-        std::cout << "无法识别发布版本号，请到 GitHub 发布页检查，已取消自动更新。\n";
-        Pause(); return;
-    }
-    if (comparison >= 0)
-    {
-        std::cout << (comparison == 0 ? "已是最新版本。\n" : "本地版本比云端发布版本更新，无需降级。\n");
-        Pause(); return;
-    }
+    std::cout << "本地 SHA256: " << localHash << "\n";
 
     if (downloadUrl.empty())
     {
@@ -7602,63 +7732,43 @@ void SoftwareUpdate()
     }
 
     // 创建临时目录
-    char tempPath[MAX_PATH];
-    GetTempPathA(MAX_PATH, tempPath);
-    std::string updateDir = std::string(tempPath) + "toolbox_update";
-    CreateDirectoryA(updateDir.c_str(), nullptr);
+    wchar_t tempPath[MAX_PATH], unique[MAX_PATH];
+    DWORD tempLength = GetTempPathW(MAX_PATH, tempPath);
+    if (!tempLength || tempLength >= MAX_PATH || !GetTempFileNameW(tempPath, L"stu", 0, unique)) { Pause(); return; }
+    DeleteFileW(unique);
+    if (!CreateDirectoryW(unique, nullptr)) { Pause(); return; }
+    std::string updateDir = std::filesystem::path(unique).u8string();
 
     std::string zipPath = updateDir + "\\update.zip";
-    DeleteFileA(zipPath.c_str());
 
-    // 下载 zip
-    std::cout << "\n正在连接到更新服务器 [完成]\n";
-    std::cout << "\n正在下载最新版本...\n";
-
-    // 方法1：PowerShell 直连下载
-    std::string dlCmd = "powershell -Command \""
-                        "$ProgressPreference='SilentlyContinue';"
-                        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12;"
-                        "Invoke-WebRequest -Uri '" +
-                        downloadUrl + "' "
-                                      "-OutFile '" +
-                        zipPath + "' -UseBasicParsing -TimeoutSec 300\"";
-    system(dlCmd.c_str());
-
-    // 检查是否成功
-    DWORD attr = GetFileAttributesA(zipPath.c_str());
-    if (attr == INVALID_FILE_ATTRIBUTES)
+    std::string expectedHash;
+    if (!manifestUrl.empty())
     {
-        // 方法2：镜像下载
-        std::cout << "直连失败，尝试镜像...\n";
-        std::string mirrorUrl = "https://ghproxy.net/" + downloadUrl;
-        std::string mirrorCmd = "powershell -Command \""
-                                "$ProgressPreference='SilentlyContinue';"
-                                "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12;"
-                                "Invoke-WebRequest -Uri '" +
-                                mirrorUrl + "' "
-                                            "-OutFile '" +
-                                zipPath + "' -UseBasicParsing -TimeoutSec 300\"";
-        system(mirrorCmd.c_str());
-
-        attr = GetFileAttributesA(zipPath.c_str());
-        if (attr == INVALID_FILE_ATTRIBUTES)
+        std::string manifestFile = updateDir + "\\SHA256SUMS.txt";
+        if (!DownloadWithFastdl(manifestUrl, manifestFile))
         {
-            // 方法3：curl 最后尝试
-            std::cout << "镜像失败，尝试 curl...\n";
-            std::string curlCmd = "C:\\Windows\\System32\\curl.exe -L --ssl-no-revoke --retry 3 -o \"" + zipPath + "\" \"" + downloadUrl + "\"";
-            system(curlCmd.c_str());
-
-            attr = GetFileAttributesA(zipPath.c_str());
-            if (attr == INVALID_FILE_ATTRIBUTES)
-            {
-                std::cout << "下载失败！请检查网络连接。" << std::endl;
-                Pause();
-                return;
-            }
+            std::cout << "无法下载发布哈希清单，已取消更新。\n";
+            Pause(); return;
+        }
+        std::ifstream manifest(std::filesystem::u8path(manifestFile));
+        expectedHash = ReadToolboxManifestHash(manifest);
+        if (expectedHash.empty())
+        {
+            std::cout << "发布哈希清单无效，已取消更新。\n";
+            Pause(); return;
+        }
+        if (expectedHash == localHash)
+        {
+            std::cout << "本地与云端程序哈希一致，无需更新。\n";
+            Pause(); return;
         }
     }
-
-    std::cout << "下载完成。\n";
+    std::cout << "正在通过 fastdl 下载发布附件...\n";
+    if (!DownloadWithFastdl(downloadUrl, zipPath))
+    {
+        std::cout << "下载未完成，已保留断点进度，请重试。\n";
+        Pause(); return;
+    }
 
     // 计算 zip 中 exe 的哈希
     std::cout << "\n正在校验远程版本...\n";
@@ -7670,18 +7780,23 @@ void SoftwareUpdate()
         return;
     }
     std::cout << "远程哈希: " << remoteHash << "\n\n";
+    if (!expectedHash.empty() && expectedHash != remoteHash)
+    {
+        std::cout << "下载附件与云端哈希清单不一致，拒绝安装。\n";
+        Pause(); return;
+    }
 
     // 对比哈希
     if (localHash == remoteHash)
     {
         std::cout << "已是最新版本，无需更新。" << std::endl;
-        DeleteFileA(zipPath.c_str());
+        DeleteFileW(std::filesystem::u8path(zipPath).c_str());
         Pause();
         return;
     }
 
     // 版本不同，询问用户
-    std::cout << "发现新版本！\n\n";
+    std::cout << "云端发布与本地程序哈希不同，可选择替换为该发布。\n\n";
     std::cout << "=== 更新说明 ===\n"
               << body << "\n\n";
     std::cout << "是否更新？(y/n): ";
@@ -7691,72 +7806,36 @@ void SoftwareUpdate()
     if (c != 'y' && c != 'Y')
     {
         std::cout << "已取消。" << std::endl;
-        DeleteFileA(zipPath.c_str());
+        DeleteFileW(std::filesystem::u8path(zipPath).c_str());
         Pause();
         return;
     }
 
-    // 获取当前 exe 路径
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    std::string exeFullPath = exePath;
-    std::string exeDir;
-    size_t lastSlash = exeFullPath.find_last_of("\\/");
-    if (lastSlash != std::string::npos)
-        exeDir = exeFullPath.substr(0, lastSlash);
-
-    std::cout << "\n准备更新，程序将退出...\n";
-    Sleep(1500);
-
-    // 生成更新脚本
-    std::string batPath = updateDir + "\\update.bat";
-    std::ofstream bat(batPath);
-    if (!bat.is_open())
+    std::vector<wchar_t> module(32768);
+    DWORD moduleLength = GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
+    if (!moduleLength || moduleLength >= module.size()) { Pause(); return; }
+    std::filesystem::path exe(module.data());
+    auto updater = std::filesystem::u8path(updateDir) / L"install.ps1";
+    std::ofstream script(updater, std::ios::binary);
+    script << "\xEF\xBB\xBF" << GetUpdateInstallScript();
+    script.close();
+    if (!script) { std::cout << "无法创建更新脚本。\n"; Pause(); return; }
+    std::vector<std::wstring> arguments{L"powershell.exe", L"-NoProfile", L"-NonInteractive", L"-ExecutionPolicy", L"Bypass",
+        L"-File", updater.wstring(), std::to_wstring(GetCurrentProcessId()),
+        std::filesystem::u8path(zipPath).wstring(), exe.wstring(), Utf8Command(remoteHash)};
+    std::wstring command;
+    for (const auto& arg : arguments) { if (!command.empty()) command += L' '; command += QuoteProcessArgument(arg); }
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process))
     {
-        std::cout << "无法创建更新脚本！" << std::endl;
-        Pause();
-        return;
+        std::cout << "无法启动更新程序，错误码: " << GetLastError() << "\n";
+        Pause(); return;
     }
-
-    bat << "@echo off\n";
-    bat << "chcp 65001 >nul\n";
-    bat << "taskkill /f /im system-toolbox.exe >nul 2>&1\n";
-    bat << "timeout /t 1 /nobreak >nul\n";
-    bat << "powershell -Command \"Expand-Archive -Path '" << zipPath << "' -DestinationPath '" << updateDir << "\\extracted' -Force\"\n";
-    bat << "timeout /t 2 /nobreak >nul\n";
-    bat << "for /r \"" << updateDir << "\\extracted\" %%i in (system-toolbox.exe) do copy /Y \"%%i\" \"" << exeFullPath << "\"\n";
-    bat << "for /r \"" << updateDir << "\\extracted\" %%i in (PsExec64.exe) do copy /Y \"%%i\" \"" << exeDir << "\\PsExec64.exe\"\n";
-    bat << "for /r \"" << updateDir << "\\extracted\" %%i in (README.md) do copy /Y \"%%i\" \"" << exeDir << "\\README.md\"\n";
-    bat << "timeout /t 1 /nobreak >nul\n";
-    bat << "start \"\" \"" << exeFullPath << "\"\n";
-    bat << "timeout /t 3 /nobreak >nul\n";
-    bat << "rmdir /s /q \"" << updateDir << "\"\n";
-    bat << "del \"%~f0\"\n";
-    bat.close();
-
-    // 启动更新脚本
-    std::string runBat = "cmd /c \"" + batPath + "\"";
-    STARTUPINFOA si = {};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi = {};
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    std::vector<char> commandLine(runBat.begin(), runBat.end());
-    commandLine.push_back('\0');
-    if (!CreateProcessA(NULL, commandLine.data(), NULL, NULL, FALSE,
-                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
-    {
-        std::cout << "无法启动更新脚本，错误码: " << GetLastError() << "\n";
-        Pause();
-        return;
-    }
-    if (pi.hProcess)
-        CloseHandle(pi.hProcess);
-    if (pi.hThread)
-        CloseHandle(pi.hThread);
-
-    std::cout << "程序即将退出..." << std::endl;
-    Sleep(2000);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    std::cout << "更新程序已启动，备份与错误日志目录: " << updateDir << "\n";
     exit(0);
 }
 
