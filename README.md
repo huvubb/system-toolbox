@@ -1,4 +1,7 @@
 # 🧰 多功能系统工具箱
+
+**简体中文** · [English](README.en.md)
+
 [![NoLogin Verified](https://nologin.tools/badges/flat-blue.svg)](https://nologin.tools/badge/ "Verified by NoLoginTools.org")
 
 **System Toolbox** —— 免费开源的 Windows 10/11 系统维护工具箱，集成后台任务队列、高速下载、音乐转码和磁盘工具。
@@ -73,7 +76,7 @@ Open-source Windows maintenance toolbox with background queues, resumable downlo
 
 #### MinGW-w64 编译命令
 ```bash
-g++ -o system-toolbox.exe system-toolbox.cpp -std=c++17 -O2 -fexec-charset=UTF-8 -finput-charset=UTF-8 -lws2_32 -lshell32 -ladvapi32 -lole32 -lcrypt32 -lopengl32 -ld3d11 -ldxgi -lgdi32 -luser32 -pthread -static
+g++ -o system-toolbox.exe system-toolbox.cpp -std=c++17 -O2 -fexec-charset=UTF-8 -finput-charset=UTF-8 -lws2_32 -lshell32 -ladvance32 -lole32 -lcrypt32 -lopengl32 -ld3d11 -ldxgi -lgdi32 -luser32 -pthread -static
 ```
 
 在项目目录内运行，输出文件使用相对路径；部分 MinGW 链接器不支持包含中文的绝对输出路径。
