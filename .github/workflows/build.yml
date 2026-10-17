@@ -25,12 +25,17 @@ jobs:
       - name: Configure MSVC
         if: matrix.compiler == 'msvc'
         run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_CXX_STANDARD=${{ matrix.standard }}
+      - uses: msys2/setup-msys2@v2
+        if: matrix.compiler == 'mingw'
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
       - name: Configure MinGW
         if: matrix.compiler == 'mingw'
-        shell: pwsh
+        shell: msys2 {0}
         run: |
-          'C:\msys64\mingw64\bin' | Out-File -FilePath $env:GITHUB_PATH -Append
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=${{ matrix.standard }} -DCMAKE_CXX_COMPILER=C:/msys64/mingw64/bin/g++.exe
+          cygpath -w /ucrt64/bin >> "$GITHUB_PATH"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=${{ matrix.standard }} -DCMAKE_CXX_COMPILER=g++
       - name: Build
         run: cmake --build build --config Release --parallel 2
       - name: Test

@@ -1,6 +1,19 @@
 # 🧰 多功能系统工具箱
 
-**System Toolbox** —— 免费、开源、全功能的 Windows 系统维护工具
+**System Toolbox** —— 免费开源的 Windows 10/11 系统维护工具箱，集成后台任务队列、高速下载、音乐转码和磁盘工具。
+
+[下载 v1.9 完整包](https://github.com/huvubb/system-toolbox/releases/download/v1.9/system-toolbox-windows.zip) · [更新说明与校验清单](https://github.com/huvubb/system-toolbox/releases/tag/v1.9) · [项目介绍](https://huvubb.github.io/system-toolbox/)
+
+Open-source Windows maintenance toolbox with background queues, resumable downloads, audio conversion and volume mounts. Built with C++17/20.
+
+### v1.9 新增
+
+- 后台队列：winget 等独立命令可后台运行，调整优先级、暂停和继续。
+- 安装后刷新 PATH，覆盖 Python、Node.js/npm、Java、Go、Rust 等常见工具。
+- 集成 fastdl、多种音乐文件转 MP3、DiskTool 可下载 DLC，以及镜像和卷挂载。
+- 根据 EXE 的 SHA256 检查更新；修复指定磁盘的开机检查设置影响其他磁盘的问题。
+
+音乐格式随厂商版本变化，部分文件需要密钥，不能保证所有平台的全部文件可转换。详见下方使用说明。
 
 [![C++](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
 [![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6.svg)](https://www.microsoft.com/windows)
@@ -11,9 +24,7 @@
 
 ## 📌 简介
 
-专治各种收费系统维护工具割韭菜。
-
-本工具箱面向 **Windows 高级用户、系统管理员与开发者**，提供近 **20 个大类** 的系统维护功能，全部免费、无广告、无需联网（除部分下载功能外）。
+本工具箱面向 **Windows 高级用户、系统管理员与开发者**，集中提供系统维护、安装、下载、音视频处理与磁盘管理入口。下载、软件安装和在线修复需要联网；系统操作请先了解选项影响。
 
 ---
 
@@ -47,7 +58,9 @@
 
 ### 方式一：直接下载 Release（推荐）
 
-前往 [Releases](https://github.com/huvubb/system-toolbox/releases) 下载最新 `system-toolbox.exe`
+下载 [v1.9 完整 ZIP](https://github.com/huvubb/system-toolbox/releases/download/v1.9/system-toolbox-windows.zip)，解压后运行 `system-toolbox.exe`。请保留同目录的 `music-converter.exe` 和 `fastdl.exe`。音乐转码另需 FFmpeg，可在工具箱内安装。
+
+发行页附有 `SHA256SUMS.txt`，可用 PowerShell 的 `Get-FileHash .\system-toolbox.exe -Algorithm SHA256` 对照主程序哈希。
 
 > **注意**：运行需要管理员权限，部分功能（如 TrustedInstaller）需要同目录下放置 [PsExec64.exe](https://live.sysinternals.com/PsExec64.exe)
 
