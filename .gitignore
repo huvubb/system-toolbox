@@ -1,2 +1,4 @@
 /build/
 /last_version.txt
+__pycache__/
+.pytest_cache/

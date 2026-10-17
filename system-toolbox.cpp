@@ -4,7 +4,7 @@
 // 运行需要管理员权限，部分操作有风险，使用前请阅读免责声明
 
 // ==================== 版本信息 ====================
-#define TOOLBOX_VERSION "v1.7"
+#define TOOLBOX_VERSION "v1.9.0"
 #define GITHUB_REPO "huvubb/system-toolbox"
 #define GITHUB_API_URL "https://api.github.com/repos/huvubb/system-toolbox/releases/latest"
 #define GITHUB_RELEASE_URL "https://github.com/huvubb/system-toolbox/releases"
@@ -114,16 +114,196 @@ void Pause()
     std::cout << std::endl;
 }
 
+std::wstring ReadEnvironmentPath(HKEY root, const wchar_t* key)
+{
+    DWORD size = 0;
+    const DWORD flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
+    if (RegGetValueW(root, key, L"Path", flags, nullptr, nullptr, &size) != ERROR_SUCCESS || size == 0)
+        return L"";
+    std::vector<wchar_t> value(size / sizeof(wchar_t) + 1, L'\0');
+    if (RegGetValueW(root, key, L"Path", flags, nullptr, value.data(), &size) != ERROR_SUCCESS)
+        return L"";
+    return value.data();
+}
+
+std::wstring ExpandPathVariables(const std::wstring& value)
+{
+    DWORD size = ExpandEnvironmentStringsW(value.c_str(), nullptr, 0);
+    if (!size) return value;
+    std::vector<wchar_t> expanded(size);
+    return ExpandEnvironmentStringsW(value.c_str(), expanded.data(), size) ? expanded.data() : value;
+}
+
+void AddPathEntries(std::wstring& result, const std::wstring& entries)
+{
+    std::wistringstream input(entries);
+    std::wstring entry;
+    while (std::getline(input, entry, L';'))
+    {
+        if (entry.empty()) continue;
+        bool found = false;
+        std::wistringstream existing(result);
+        std::wstring item;
+        while (std::getline(existing, item, L';'))
+            if (_wcsicmp(item.c_str(), entry.c_str()) == 0) { found = true; break; }
+        if (!found)
+        {
+            if (!result.empty()) result += L';';
+            result += entry;
+        }
+    }
+}
+
+void RefreshEnvironmentPath()
+{
+    DWORD size = GetEnvironmentVariableW(L"PATH", nullptr, 0);
+    std::vector<wchar_t> oldPath(size ? size : 1, L'\0');
+    if (size) GetEnvironmentVariableW(L"PATH", oldPath.data(), size);
+    std::wstring path;
+    AddPathEntries(path, ExpandPathVariables(ReadEnvironmentPath(HKEY_LOCAL_MACHINE,
+        L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment")));
+    AddPathEntries(path, ExpandPathVariables(ReadEnvironmentPath(HKEY_CURRENT_USER, L"Environment")));
+    AddPathEntries(path, oldPath.data());
+    if (!path.empty()) SetEnvironmentVariableW(L"PATH", path.c_str());
+}
+
+bool EnsureUserPath(const std::wstring& entry)
+{
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Environment", 0, nullptr, 0,
+                        KEY_QUERY_VALUE | KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS)
+        return false;
+    DWORD type = REG_EXPAND_SZ, size = 0;
+    LONG status = RegQueryValueExW(key, L"Path", nullptr, &type, nullptr, &size);
+    if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+    {
+        RegCloseKey(key);
+        return false;
+    }
+    if (status == ERROR_FILE_NOT_FOUND) { type = REG_EXPAND_SZ; size = 0; }
+    if (type != REG_SZ && type != REG_EXPAND_SZ)
+    {
+        RegCloseKey(key);
+        return false;
+    }
+    std::vector<wchar_t> buffer(size / sizeof(wchar_t) + 1, L'\0');
+    if (size && RegQueryValueExW(key, L"Path", nullptr, &type, reinterpret_cast<BYTE*>(buffer.data()), &size) != ERROR_SUCCESS)
+    {
+        RegCloseKey(key);
+        return false;
+    }
+    std::wstring path = buffer.data();
+    const std::wstring npmEntry = type == REG_SZ ? ExpandPathVariables(entry) : entry;
+    std::wstring expanded = ExpandPathVariables(path);
+    const std::wstring before = expanded;
+    AddPathEntries(expanded, ExpandPathVariables(npmEntry));
+    if (expanded == before) { RegCloseKey(key); return true; }
+    if (!path.empty() && path.back() != L';') path += L';';
+    path += npmEntry;
+    LONG result = RegSetValueExW(key, L"Path", 0, type,
+        reinterpret_cast<const BYTE*>(path.c_str()), static_cast<DWORD>((path.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+    if (result != ERROR_SUCCESS) return false;
+    DWORD_PTR ignored;
+    SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, reinterpret_cast<LPARAM>(L"Environment"),
+        SMTO_ABORTIFHUNG, 1000, &ignored);
+    return true;
+}
+
+void RegisterInstalledToolPaths(const std::string& command)
+{
+    struct ToolPath { const char* package; const wchar_t* file; };
+    const ToolPath tools[] = {
+        {"Python.Python.", L"%LOCALAPPDATA%\\Programs\\Python\\Python*\\python.exe"},
+        {"Python.Python.", L"%LOCALAPPDATA%\\Programs\\Python\\Python*\\Scripts\\pip.exe"},
+        {"OpenJS.NodeJS", L"%ProgramFiles%\\nodejs\\node.exe"},
+        {"Microsoft.DotNet.", L"%ProgramFiles%\\dotnet\\dotnet.exe"},
+        {"Oracle.JDK.", L"%ProgramFiles%\\Java\\jdk-*\\bin\\java.exe"},
+        {"Rustlang.Rustup", L"%USERPROFILE%\\.cargo\\bin\\cargo.exe"},
+        {"GoLang.Go", L"%ProgramFiles%\\Go\\bin\\go.exe"},
+        {"Kitware.CMake", L"%ProgramFiles%\\CMake\\bin\\cmake.exe"},
+        {"GnuWin32.Make", L"%ProgramFiles(x86)%\\GnuWin32\\bin\\make.exe"},
+        {"Git.Git", L"%ProgramFiles%\\Git\\cmd\\git.exe"},
+        {"MSYS2.MSYS2", L"%SystemDrive%\\msys64\\usr\\bin\\bash.exe"},
+        {"TheDocumentFoundation.LibreOffice", L"%ProgramFiles%\\LibreOffice\\program\\soffice.exe"},
+        {"JohnMacFarlane.Pandoc", L"%LOCALAPPDATA%\\Pandoc\\pandoc.exe"},
+        {"ImageMagick.ImageMagick", L"%ProgramFiles%\\ImageMagick-*\\magick.exe"},
+        {"ArtifexSoftware.GhostScript", L"%ProgramFiles%\\gs\\gs*\\bin\\gswin64c.exe"},
+        {"calibre.calibre", L"%ProgramFiles%\\Calibre2\\ebook-convert.exe"},
+        {"Ninja-build.Ninja", L"%LOCALAPPDATA%\\Microsoft\\WinGet\\Links\\ninja.exe"},
+        {"Gyan.FFmpeg", L"%LOCALAPPDATA%\\Microsoft\\WinGet\\Links\\ffmpeg.exe"},
+        {"BrechtSanders.WinLibs", L"%LOCALAPPDATA%\\Microsoft\\WinGet\\Packages\\BrechtSanders.WinLibs*\\mingw64\\bin\\g++.exe"},
+        {"wimlib", L"%LOCALAPPDATA%\\Microsoft\\WinGet\\Links\\wimlib-imagex.exe"},
+        {"Microsoft.WindowsADK", L"%ProgramFiles(x86)%\\Windows Kits\\10\\Assessment and Deployment Kit\\Deployment Tools\\amd64\\Oscdimg\\oscdimg.exe"}
+    };
+    for (const auto& tool : tools)
+    {
+        if (command.find(tool.package) == std::string::npos) continue;
+        std::wstring pattern = ExpandPathVariables(tool.file);
+        size_t wildcard = pattern.find_first_of(L"*?");
+        std::vector<std::filesystem::path> candidates;
+        if (wildcard == std::wstring::npos) candidates.emplace_back(pattern);
+        else
+        {
+            size_t slash = pattern.find(L'\\', wildcard);
+            std::wstring folderPattern = pattern.substr(0, slash);
+            WIN32_FIND_DATAW data{};
+            HANDLE search = FindFirstFileW(folderPattern.c_str(), &data);
+            if (search != INVALID_HANDLE_VALUE)
+            {
+                do {
+                    if (data.cFileName[0] == L'.') continue;
+                    candidates.push_back(std::filesystem::path(folderPattern).parent_path() /
+                        (std::wstring(data.cFileName) + (slash == std::wstring::npos ? L"" : pattern.substr(slash))));
+                } while (FindNextFileW(search, &data));
+                FindClose(search);
+            }
+        }
+        for (const auto& file : candidates)
+        {
+            std::error_code ec;
+            if (std::filesystem::is_regular_file(file, ec) && !EnsureUserPath(file.parent_path().wstring()))
+                std::cout << "无法写入用户 PATH，请检查权限。\n";
+        }
+    }
+    if (command.find("OpenJS.NodeJS") != std::string::npos)
+        EnsureUserPath(L"%APPDATA%\\npm");
+}
+
+#include "task-queue.h"
+
+std::wstring Utf8Command(const std::string& text)
+{
+    int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    if (!length) return L"";
+    std::wstring result(length, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), length);
+    return result;
+}
+
 // 执行系统命令
 void RunCmd(const std::string& cmd, bool showOutput = true)
 {
+    if (GetTaskQueue().enabled)
+    {
+        int id = GetTaskQueue().Add(L"cmd.exe /d /s /c \"" + Utf8Command(cmd) + L"\"");
+        std::cout << "后台任务 ID: " << id << "（主菜单 31 控制）\n";
+        return;
+    }
     std::cout << ">> " << cmd << std::endl;
+    int ret;
     if (!showOutput)
-        system((cmd + " >nul 2>&1").c_str());
+        ret = system((cmd + " >nul 2>&1").c_str());
     else
     {
-        int ret = system(cmd.c_str());
+        ret = system(cmd.c_str());
         std::cout << "返回码: " << ret << std::endl;
+    }
+    if (ret == 0 && cmd.rfind("winget install ", 0) == 0)
+    {
+        RegisterInstalledToolPaths(cmd);
+        RefreshEnvironmentPath();
+        std::cout << "已刷新当前程序的 PATH。\n";
     }
 }
 
@@ -496,6 +676,7 @@ int main()
         }
 
         std::cout << "----------------------------------------\n";
+        std::cout << "31. 后台任务队列控制\n";
         std::cout << "90. 切换在线/离线模式\n";
         std::cout << " 0. 退出程序\n";
         std::cout << "========================================\n";
@@ -551,6 +732,7 @@ int main()
             case 28: HashToolsMenu(); break;
             case 29: BaseConverterMenu(); break;
             case 30: ChkdskControlMenu(); break;
+            case 31: TaskQueueMenu(); RefreshEnvironmentPath(); break;
 
             case 90:  // 切换模式
                 ToggleMode();
@@ -6705,6 +6887,8 @@ void CompileToolsMenu()
         auto wingetInstall = [](const std::string& packageId)
         {
             std::string cmd = "winget install " + packageId + " --silent --accept-package-agreements --accept-source-agreements";
+            if (packageId.rfind("Python.Python.", 0) == 0)
+                cmd += " --override \"/quiet InstallAllUsers=0 PrependPath=1 Include_launcher=1\"";
             RunCmd(cmd);
         };
         
@@ -7347,6 +7531,31 @@ void ShowUpdateContent()
 // 保存当前哈希
 
 
+bool ParseReleaseVersion(std::string text, std::vector<unsigned long long>& parts)
+{
+    parts.clear();
+    if (!text.empty() && (text[0] == 'v' || text[0] == 'V')) text.erase(0, 1);
+    if (text.empty()) return false;
+    std::istringstream input(text);
+    std::string item;
+    while (std::getline(input, item, '.'))
+    {
+        if (item.empty() || item.find_first_not_of("0123456789") != std::string::npos) return false;
+        try { parts.push_back(std::stoull(item)); } catch (...) { return false; }
+    }
+    return !parts.empty() && text.back() != '.';
+}
+
+bool CompareReleaseVersions(const std::string& local, const std::string& remote, int& comparison)
+{
+    std::vector<unsigned long long> left, right;
+    if (!ParseReleaseVersion(local, left) || !ParseReleaseVersion(remote, right)) return false;
+    size_t size = std::max(left.size(), right.size());
+    left.resize(size); right.resize(size);
+    comparison = left == right ? 0 : left < right ? -1 : 1;
+    return true;
+}
+
 // 软件更新主函数
 void SoftwareUpdate()
 {
@@ -7373,6 +7582,17 @@ void SoftwareUpdate()
     }
 
     std::cout << "GitHub 最新版本: " << latestVersion << "\n";
+    int comparison = 0;
+    if (!CompareReleaseVersions(TOOLBOX_VERSION, latestVersion, comparison))
+    {
+        std::cout << "无法识别发布版本号，请到 GitHub 发布页检查，已取消自动更新。\n";
+        Pause(); return;
+    }
+    if (comparison >= 0)
+    {
+        std::cout << (comparison == 0 ? "已是最新版本。\n" : "本地版本比云端发布版本更新，无需降级。\n");
+        Pause(); return;
+    }
 
     if (downloadUrl.empty())
     {
@@ -7556,8 +7776,13 @@ std::string Utf8ToGbk(const std::string& utf8)
 }
 
 // 执行 FFmpeg 命令
-bool RunFFmpeg(const std::string& cmd)
+bool RunFFmpeg(const std::string& cmd, bool waitForResult = false)
 {
+    if (GetTaskQueue().enabled && !waitForResult)
+    {
+        std::cout << "后台媒体任务 ID: " << GetTaskQueue().Add(L"cmd.exe /d /s /c \"" + Utf8Command(cmd) + L"\"") << "\n";
+        return true;
+    }
     std::string gbkCmd = Utf8ToGbk(cmd);
     std::cout << ">> " << cmd << std::endl;
     int ret = system(gbkCmd.c_str());
@@ -7566,6 +7791,93 @@ bool RunFFmpeg(const std::string& cmd)
         std::cout << "\n[提示] 命令执行失败（返回码: " << ret << "）\n";
     }
     return ret == 0;
+}
+
+std::wstring QuoteProcessArgument(const std::wstring& argument)
+{
+    std::wstring result = L"\"";
+    size_t slashes = 0;
+    for (wchar_t c : argument)
+    {
+        if (c == L'\\') { ++slashes; continue; }
+        result.append(c == L'\"' ? slashes * 2 + 1 : slashes, L'\\');
+        slashes = 0;
+        result += c;
+    }
+    result.append(slashes * 2, L'\\');
+    return result + L"\"";
+}
+
+std::string UnquotePath(std::string path)
+{
+    if (path.size() >= 2 && path.front() == '"' && path.back() == '"')
+        return path.substr(1, path.size() - 2);
+    return path;
+}
+
+bool RunMusicConverter(const std::string& input, const std::string& output,
+                       const std::string& ekey, const std::string& keyDatabase)
+{
+    std::vector<wchar_t> module(32768);
+    DWORD length = GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
+    if (!length || length >= module.size())
+    {
+        std::cout << "[错误] 无法确定程序目录。\n";
+        return false;
+    }
+    std::filesystem::path directory = std::filesystem::path(module.data()).parent_path();
+    std::filesystem::path helper = directory / L"music-converter.exe";
+    std::filesystem::path script = directory / L"music-converter" / L"unlocker.py";
+    std::vector<std::wstring> args;
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(helper, ec))
+        args.push_back(helper.wstring());
+    else if (std::filesystem::is_regular_file(script, ec))
+        args = {L"python.exe", L"-X", L"utf8", script.wstring()};
+    else
+    {
+        std::cout << "[错误] 缺少多平台转换组件，请使用完整安装包。\n";
+        return false;
+    }
+    args.insert(args.end(), {L"--format", L"mp3", L"--no-embed-cover", L"-o",
+                            std::filesystem::u8path(output).wstring()});
+    if (!ekey.empty())
+    {
+        args.push_back(L"--ekey");
+        args.push_back(std::filesystem::u8path(ekey).wstring());
+    }
+    if (!keyDatabase.empty())
+    {
+        args.push_back(L"--ekey-db");
+        args.push_back(std::filesystem::u8path(keyDatabase).wstring());
+    }
+    args.push_back(std::filesystem::u8path(input).wstring());
+    std::wstring command;
+    for (const auto& arg : args)
+    {
+        if (!command.empty()) command += L' ';
+        command += QuoteProcessArgument(arg);
+    }
+    if (GetTaskQueue().enabled)
+    {
+        std::cout << "后台音乐任务 ID: " << GetTaskQueue().Add(command) << "\n";
+        return true;
+    }
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process))
+    {
+        std::cout << "[错误] 无法启动转换组件（错误码 " << GetLastError()
+                  << "）；源码运行需安装 Python 和转换组件依赖。\n";
+        return false;
+    }
+    WaitForSingleObject(process.hProcess, INFINITE);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(process.hProcess, &exitCode);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return exitCode == 0;
 }
 
 bool ReadNcmUint32(std::istream& input, uint32_t& value)
@@ -7591,7 +7903,7 @@ bool DecryptNcmKey(std::vector<BYTE>& encryptedKey)
     if (encryptedKey.empty() || encryptedKey.size() % 16 != 0)
         return false;
 
-    const BYTE coreKey[] = "#14ljk_!\\]&0U<'(";
+    const BYTE coreKey[] = "hzHRAmso5kInbaxW";
     struct KeyBlob
     {
         BLOBHEADER header;
@@ -7625,7 +7937,7 @@ bool DecodeNcmAudio(const std::filesystem::path& source, const std::filesystem::
         return false;
     }
     char magic[8];
-    uint32_t keyLength = 0, metadataLength = 0, imageLength = 0;
+    uint32_t keyLength = 0, metadataLength = 0, imageSpace = 0, imageLength = 0;
     if (!input.read(magic, sizeof(magic)) || memcmp(magic, "CTENFDAM", sizeof(magic)) != 0 ||
         !input.ignore(2) || !ReadNcmUint32(input, keyLength) ||
         keyLength == 0 || keyLength > 1024 * 1024)
@@ -7651,7 +7963,8 @@ bool DecodeNcmAudio(const std::filesystem::path& source, const std::filesystem::
 
     if (!ReadNcmUint32(input, metadataLength) || metadataLength > 64 * 1024 * 1024 ||
         !SkipNcmBytes(input, metadataLength) || !SkipNcmBytes(input, 5) ||
-        !ReadNcmUint32(input, imageLength) || !SkipNcmBytes(input, imageLength))
+        !ReadNcmUint32(input, imageSpace) || !ReadNcmUint32(input, imageLength) ||
+        imageLength > imageSpace || !SkipNcmBytes(input, imageSpace))
     {
         error = "NCM 元数据不完整。";
         return false;
@@ -7820,7 +8133,7 @@ void SmartDecodePipeline(const std::string& src, const std::string& dst,
 
         std::string tempFile = src + ".h264temp.mp4";
         std::string preCmd = "ffmpeg -i \"" + src + "\" -c:v libx264 -preset fast -crf 20 -c:a aac -y \"" + tempFile + "\"";
-        RunFFmpeg(preCmd);
+        RunFFmpeg(preCmd, true);
 
         // 检查转码结果
         if (GetFileAttributesA(tempFile.c_str()) == INVALID_FILE_ATTRIBUTES)
@@ -7833,7 +8146,7 @@ void SmartDecodePipeline(const std::string& src, const std::string& dst,
 
         // 对转码后的文件硬解
         std::string cmd = "ffmpeg " + hwAccel + " -i \"" + tempFile + "\" " + extraArgs + " -y \"" + dst + "\"";
-        RunFFmpeg(cmd);
+        RunFFmpeg(cmd, true);
 
         DeleteFileA(tempFile.c_str());
     }
@@ -7841,7 +8154,7 @@ void SmartDecodePipeline(const std::string& src, const std::string& dst,
     {
         // 直接硬解
         std::string cmd = "ffmpeg " + hwAccel + " -i \"" + src + "\" " + extraArgs + " -y \"" + dst + "\"";
-        RunFFmpeg(cmd);
+        RunFFmpeg(cmd, true);
     }
 }
 
@@ -8084,7 +8397,7 @@ void MediaToolsMenu()
         std::cout << "27. 提取视频字幕\n";
         std::cout << "\n=== 音乐软件私有格式 ===\n";
         std::cout << "28. 网易云 NCM 转 MP3\n";
-        std::cout << "29. 通用加密格式（unlock-music）\n";
+        std::cout << "29. 多平台音乐格式转 MP3（支持批量）\n";
         std::cout << "\n=== 批量操作 ===\n";
         std::cout << "30. 批量格式转换\n";
         std::cout << "31. 批量提取音频\n";
@@ -8438,8 +8751,8 @@ void MediaToolsMenu()
             {
                 ClearScreen();
                 std::cout << "========== 网易云 NCM 转 MP3 ==========\n";
-                std::string src = GetInput("输入 NCM 文件: ");
-                std::string dst = GetInput("输出 MP3（留空则保存在原文件旁）: ");
+                std::string src = UnquotePath(GetInput("输入 NCM 文件: "));
+                std::string dst = UnquotePath(GetInput("输出 MP3（留空则保存在原文件旁）: "));
                 if (src.empty()) { Pause(); break; }
 
                 std::filesystem::path source = std::filesystem::u8path(src);
@@ -8468,7 +8781,7 @@ void MediaToolsMenu()
                     break;
                 }
                 bool converted = RunFFmpeg("ffmpeg -v error -i \"" + decoded.u8string() +
-                                           "\" -vn -c:a libmp3lame -q:a 2 -y \"" + encoded.u8string() + "\"");
+                                           "\" -vn -c:a libmp3lame -q:a 2 -y \"" + encoded.u8string() + "\"", true);
                 std::filesystem::remove(decoded, ec);
                 if (!converted || !std::filesystem::exists(encoded, ec) || std::filesystem::file_size(encoded, ec) == 0)
                 {
@@ -8477,9 +8790,7 @@ void MediaToolsMenu()
                     Pause();
                     break;
                 }
-                std::filesystem::remove(destination, ec);
-                std::filesystem::rename(encoded, destination, ec);
-                if (ec)
+                if (!MoveFileExW(encoded.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
                 {
                     std::filesystem::remove(encoded, ec);
                     std::cout << "[错误] 无法保存输出文件。\n";
@@ -8493,16 +8804,41 @@ void MediaToolsMenu()
             case 29:
             {
                 ClearScreen();
-                std::cout << "========== 通用加密音乐格式 ==========\n";
-                std::cout << "推荐工具: unlock-music\n";
-                std::cout << "支持: NCM / QMC / KGM / KWm / XM / MG\n\n";
-                std::cout << "GitHub: https://github.com/unlock-music/unlock-music\n\n";
-                std::cout << "是否打开下载页面？(y/n): ";
-                char c;
-                std::cin >> c;
-                std::cin.ignore();
-                if (c == 'y' || c == 'Y')
-                    ShellExecuteA(NULL, "open", "https://github.com/unlock-music/unlock-music/releases", NULL, NULL, SW_SHOWNORMAL);
+                std::cout << "========== 多平台音乐转 MP3 ==========\n";
+                std::cout << "支持网易云 NCM、QQ 音乐 QMC/MFLAC/MGG、酷狗 KGM/VPR、酷我 KWM。\n";
+                std::cout << "部分新版文件需要歌曲 EKey 或密钥库；其他加密格式可能不支持。\n";
+                std::string src = UnquotePath(GetInput("输入文件或目录: "));
+                if (src.empty()) { Pause(); break; }
+                std::error_code ec;
+                auto inputPath = std::filesystem::u8path(src);
+                if (!std::filesystem::exists(inputPath, ec))
+                {
+                    std::cout << "[错误] 输入路径不存在。\n";
+                    Pause();
+                    break;
+                }
+                inputPath = std::filesystem::absolute(inputPath, ec);
+                if (ec) { std::cout << "[错误] 无法读取输入路径。\n"; Pause(); break; }
+                src = inputPath.u8string();
+                std::string output = UnquotePath(GetInput("输出目录（留空使用输入旁的 converted 文件夹）: "));
+                if (output.empty())
+                {
+                    auto base = std::filesystem::is_directory(inputPath, ec) ? inputPath : inputPath.parent_path();
+                    output = (base / "converted").u8string();
+                }
+                auto outputPath = std::filesystem::absolute(std::filesystem::u8path(output), ec);
+                if (ec) { std::cout << "[错误] 无法读取输出路径。\n"; Pause(); break; }
+                output = outputPath.u8string();
+                std::string ekey = GetInput("QQ 音乐 EKey（可选，留空跳过）: ");
+                std::string keyDatabase = UnquotePath(GetInput("QQ 音乐密钥库路径（可选，留空跳过）: "));
+                if (!keyDatabase.empty())
+                {
+                    auto keyPath = std::filesystem::absolute(std::filesystem::u8path(keyDatabase), ec);
+                    if (ec) { std::cout << "[错误] 无法读取密钥库路径。\n"; Pause(); break; }
+                    keyDatabase = keyPath.u8string();
+                }
+                if (!RunMusicConverter(src, output, ekey, keyDatabase))
+                    std::cout << "[错误] 转换未全部成功，请查看上面的原因。\n";
                 Pause();
                 break;
             }

@@ -29,7 +29,7 @@ void WriteFile(const std::filesystem::path &path, const std::string &content)
 
 std::vector<BYTE> EncryptNcmKeyForTest(std::vector<BYTE> plain)
 {
-    const BYTE coreKey[] = "#14ljk_!\\]&0U<'(";
+    const BYTE coreKey[] = "hzHRAmso5kInbaxW";
     struct KeyBlob
     {
         BLOBHEADER header;
@@ -83,13 +83,78 @@ void WriteNcmFixture(const std::filesystem::path &path, const std::string &audio
     out.write(reinterpret_cast<const char *>(encryptedKey.data()), static_cast<std::streamsize>(encryptedKey.size()));
     writeUint32(0);
     out.write("\0\0\0\0\0", 5);
-    writeUint32(0);
+    writeUint32(8);
+    writeUint32(5);
+    out.write("cover\0\0\0", 8);
     out.write(reinterpret_cast<const char *>(encryptedAudio.data()), static_cast<std::streamsize>(encryptedAudio.size()));
     assert(out.good());
 }
 
 int main()
 {
+    DWORD musicInputSize = GetEnvironmentVariableW(L"TOOLBOX_TEST_MUSIC_INPUT", nullptr, 0);
+    if (musicInputSize)
+    {
+        std::vector<wchar_t> musicInput(musicInputSize), musicOutput(32768);
+        GetEnvironmentVariableW(L"TOOLBOX_TEST_MUSIC_INPUT", musicInput.data(), musicInputSize);
+        DWORD outputSize = GetEnvironmentVariableW(L"TOOLBOX_TEST_MUSIC_OUTPUT", musicOutput.data(),
+                                                   static_cast<DWORD>(musicOutput.size()));
+        assert(outputSize && outputSize < musicOutput.size());
+        return RunMusicConverter(std::filesystem::path(musicInput.data()).u8string(),
+                                 std::filesystem::path(musicOutput.data()).u8string(), "", "") ? 0 : 1;
+    }
+    std::wstring path = L"C:\\Tools;C:\\Node";
+    int comparison = 99;
+    assert(CompareReleaseVersions("v1.8", "1.8.0", comparison) && comparison == 0);
+    assert(CompareReleaseVersions("v1.9", "v1.10", comparison) && comparison == -1);
+    assert(CompareReleaseVersions("v2.0", "v1.99", comparison) && comparison == 1);
+    assert(!CompareReleaseVersions("v1.8", "v1.9-beta", comparison));
+    assert(!CompareReleaseVersions("v1.8", "v1.9.", comparison));
+    {
+        TaskQueue queue;
+        { std::lock_guard<std::mutex> lock(queue.mutex); queue.parallel = 0; }
+        int first = queue.Add(L"cmd.exe /d /c exit 0");
+        assert(queue.Control(first, 1));
+        assert(queue.Control(first, 3, 2));
+        assert(!queue.Control(first, 3, 3));
+        assert(queue.Control(first, 2));
+        { std::lock_guard<std::mutex> lock(queue.mutex); queue.parallel = 1; }
+        bool completed = false;
+        for (int attempt = 0; attempt < 100; ++attempt)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::lock_guard<std::mutex> lock(queue.mutex);
+            if (queue.tasks[0]->state == "done") { completed = true; break; }
+            assert(queue.tasks[0]->state != "failed");
+        }
+        assert(completed);
+        int slow = queue.Add(L"cmd.exe /d /c ping -n 4 127.0.0.1 >nul");
+        bool started = false;
+        for (int attempt = 0; attempt < 100; ++attempt)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::lock_guard<std::mutex> lock(queue.mutex);
+            if (queue.tasks[slow-1]->state == "running") { started = true; break; }
+        }
+        assert(started);
+        assert(queue.Control(slow, 1));
+        assert(queue.Control(slow, 3, 0));
+        int other = queue.Add(L"cmd.exe /d /c exit 0");
+        bool otherCompleted = false;
+        for (int attempt = 0; attempt < 100; ++attempt)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::lock_guard<std::mutex> lock(queue.mutex);
+            if (queue.tasks[other-1]->state == "done") { otherCompleted = true; break; }
+        }
+        assert(otherCompleted);
+        assert(queue.Control(slow, 2));
+    }
+    AddPathEntries(path, L"c:\\tools;C:\\Python;;C:\\Node");
+    assert(path == L"C:\\Tools;C:\\Node;C:\\Python");
+    assert(QuoteProcessArgument(L"C:\\音乐 文件\\") == L"\"C:\\音乐 文件\\\\\"");
+    assert(QuoteProcessArgument(L"a\"b") == L"\"a\\\"b\"");
+
     std::istringstream input("\n42\n -7 \n12abc\n99999999999999999999999\nabc\n\n");
     auto *oldInput = std::cin.rdbuf(input.rdbuf());
     assert(GetIntInput("", 23) == 23);

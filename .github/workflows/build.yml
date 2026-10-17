@@ -30,3 +30,31 @@ jobs:
         run: cmake --build build --config Release --parallel 2
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+      - uses: actions/setup-python@v5
+        if: matrix.compiler == 'msvc'
+        with:
+          python-version: '3.11'
+      - name: Test and package music converter
+        if: matrix.compiler == 'msvc'
+        shell: pwsh
+        run: |
+          python -m pip install -r music-converter/requirements.txt pytest==8.4.2 pyinstaller==6.16.0
+          python -m pytest music-converter/tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m PyInstaller --noconfirm --onefile --name music-converter --add-data "music-converter/assets;assets" --distpath build/Release music-converter/unlocker.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item music-converter/LICENSE build/Release/MUSIC-CONVERTER-LICENSE.txt
+          Copy-Item music-converter/UPSTREAM.md build/Release/MUSIC-CONVERTER-NOTICE.md
+          $env:MUSIC_CONVERTER_EXECUTABLE = (Resolve-Path build/Release/music-converter.exe).Path
+          $env:TOOLBOX_TEST_EXECUTABLE = (Resolve-Path build/Release/toolbox-tests.exe).Path
+          python -m pytest music-converter/tests/test_cli.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: matrix.compiler == 'msvc'
+        with:
+          name: system-toolbox-windows
+          path: |
+            build/Release/system-toolbox.exe
+            build/Release/music-converter.exe
+            build/Release/MUSIC-CONVERTER-LICENSE.txt
+            build/Release/MUSIC-CONVERTER-NOTICE.md

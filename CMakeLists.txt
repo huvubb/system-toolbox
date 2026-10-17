@@ -12,6 +12,17 @@ find_package(Threads REQUIRED)
 include(CTest)
 
 add_executable(system-toolbox system-toolbox.cpp)
+add_custom_command(TARGET system-toolbox POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/music-converter/music_unlock" "$<TARGET_FILE_DIR:system-toolbox>/music-converter/music_unlock"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/music-converter/assets" "$<TARGET_FILE_DIR:system-toolbox>/music-converter/assets"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/music-converter/unlocker.py" "$<TARGET_FILE_DIR:system-toolbox>/music-converter/unlocker.py"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/music-converter/LICENSE" "$<TARGET_FILE_DIR:system-toolbox>/music-converter/LICENSE"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/music-converter/UPSTREAM.md" "$<TARGET_FILE_DIR:system-toolbox>/music-converter/UPSTREAM.md")
 set(toolbox_targets system-toolbox)
 if(BUILD_TESTING)
     add_executable(toolbox-tests tests/toolbox-tests.cpp)

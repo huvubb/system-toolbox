@@ -82,6 +82,22 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+### 音乐文件转 MP3
+
+在「音视频工具」中选择 29，可转换单个文件或批量转换目录：支持网易云 NCM、QQ 音乐 QMC/MFLAC/MGG、酷狗 KGM/KGMA/VPR、酷我 KWM 等格式。部分 QQ 音乐文件需提供对应 EKey 或密钥库；酷狗 KGG v5 等未支持的格式会提示失败。不同版本的加密格式不保证全部兼容。转码需要 FFmpeg，已存在的输出会使用新文件名。
+
+完整 Windows 构建包包含 `music-converter.exe`，需与 `system-toolbox.exe` 放在同一目录。源码构建时，安装 Python 3.10+ 后执行 `python -m pip install -r music-converter/requirements.txt`；CMake 会将转换脚本复制到程序目录。该组件来源及许可证见 [music-converter/UPSTREAM.md](music-converter/UPSTREAM.md)。
+
+工具箱通过 winget 安装软件成功后会刷新当前进程的 PATH；安装 Python 时启用安装器的 PATH 选项，安装 Node.js 时会将 npm 全局目录加入用户 PATH。对 Java、Go、Rust、Git、CMake、Make、MSYS2、FFmpeg、文档转换工具等也会检查已知安装目录，仅将实际存在的命令目录补入用户 PATH；其他安装目录使用安装器注册的 PATH。Visual Studio 编译器仍需开发者终端初始化 SDK 环境。
+
 编译器须已加入 PATH。切换编译器时使用新的构建目录。MSVC 可执行文件位于 `build/Release/`，MinGW 位于 `build/`。MinGW 构建静态链接运行库，方便复制到其他 Windows 电脑。
 
 回归测试覆盖整数输入、SHA256、中文路径、更新状态、文件进制及 Base64 往返转换、无效输入保留目标文件、十六进制查看边界。测试不执行磁盘修复、注册表修改或硬件压力测试。GitHub Actions 会使用 MSVC 和 MinGW 分别构建并运行同一套测试。
+
+音乐转码会先请求 FFmpeg 自动选择硬件加速，失败后回退软件解码；常见音频解码器通常仍在 CPU 上运行，不能据此声称已使用 GPU。
+
+### 后台队列和版本检查
+
+主菜单 31 可开启后台提交；后续独立系统命令、普通 FFmpeg 操作、多平台音乐转换会进入队列，菜单可继续操作。默认并发 2，支持 1–8 个并发任务、低/普通/高优先级、暂停/继续及独立日志。等待任务按优先级和提交顺序调度，运行任务及其子进程同步控制。依赖中间文件的智能流水线、内置计算、交互式命令仍在前台运行。后台任务没有交互输入，请只提交无需输入的操作；退出工具箱会结束未完成任务，暂停安装或系统维护可能持续占用资源。
+
+更新检查比较程序内置版本与 GitHub 正式发布标签，支持 `v1.8` 与 `1.8.0` 等价，按数字比较 `1.10` 与 `1.9`，不将不同编译产生的哈希差异误判为版本升级，也不自动降级。无法识别的标签会提示手动检查。
