@@ -27,6 +27,7 @@ bool g_bModeInitialized = false;
 #include <cstdlib>
 #include <cstring>
 #include <cctype>
+#include <cwctype>
 #include <sstream>
 #include <algorithm>
 #include <iomanip>
@@ -61,6 +62,23 @@ bool g_bModeInitialized = false;
 // 基础工具函数
 // ====================================================================
 std::string GetBuildIdentity();
+
+std::string PathToUtf8(const std::filesystem::path& path)
+{
+    const auto utf8 = path.u8string();
+    return {reinterpret_cast<const char*>(utf8.data()), utf8.size()};
+}
+
+std::filesystem::path GetToolboxDataDirectory()
+{
+    std::vector<wchar_t> directory(32768);
+    DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", directory.data(), static_cast<DWORD>(directory.size()));
+    if (!length || length >= directory.size()) return {};
+    auto path = std::filesystem::path(directory.data()) / L"SystemToolbox";
+    std::error_code error;
+    std::filesystem::create_directories(path, error);
+    return error ? std::filesystem::path{} : path;
+}
 
 // 控制台代码页设置为 UTF-8
 void SetUtf8Console()
@@ -272,7 +290,226 @@ void RegisterInstalledToolPaths(const std::string& command)
         EnsureUserPath(L"%APPDATA%\\npm");
 }
 
-#include "task-queue.h"
+
+#include <mutex>
+#include <memory>
+
+class TaskQueue
+{
+public:
+    struct Task
+    {
+        int id, priority = 1;
+        std::wstring command, log;
+        HANDLE process = nullptr, job = nullptr;
+        std::string state = "waiting";
+        DWORD result = 0;
+        bool paused = false;
+        ~Task() { if (process) CloseHandle(process); if (job) CloseHandle(job); }
+    };
+    std::mutex mutex;
+    std::vector<std::shared_ptr<Task>> tasks;
+    bool enabled = false;
+    int parallel = 2;
+
+    TaskQueue() : worker([this] { Work(); }) {}
+    ~TaskQueue()
+    {
+        { std::lock_guard<std::mutex> lock(mutex); stopping = true; }
+        worker.join();
+        for (auto& task : tasks)
+            if (task->job && task->state == "running") TerminateJobObject(task->job, ERROR_CANCELLED);
+    }
+
+    int Add(const std::wstring& command)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto task = std::make_shared<Task>();
+        task->id = static_cast<int>(tasks.size()) + 1;
+        task->command = command;
+        wchar_t temp[MAX_PATH];
+        if (!GetTempPathW(MAX_PATH, temp)) return 0;
+        task->log = std::wstring(temp) + L"toolbox-task-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(task->id) + L".log";
+        tasks.push_back(task);
+        return task->id;
+    }
+
+    static DWORD Priority(int value)
+    {
+        return value == 0 ? BELOW_NORMAL_PRIORITY_CLASS : value == 2 ? ABOVE_NORMAL_PRIORITY_CLASS : NORMAL_PRIORITY_CLASS;
+    }
+
+    bool Control(int id, int action, int priority = 1)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (id <= 0 || id > static_cast<int>(tasks.size())) return false;
+        auto& task = *tasks[id - 1];
+        if (task.state != "waiting" && task.state != "running") return false;
+        if (action == 3)
+        {
+            if (priority < 0 || priority > 2) return false;
+            task.priority = priority;
+        }
+        if (task.state == "waiting")
+        {
+            if (action == 1) task.paused = true;
+            if (action == 2) task.paused = false;
+            return true;
+        }
+        // Job membership confines process controls to this task and its children.
+        std::vector<BYTE> data(sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST) + 4096 * sizeof(ULONG_PTR));
+        auto* ids = reinterpret_cast<JOBOBJECT_BASIC_PROCESS_ID_LIST*>(data.data());
+        if (!QueryInformationJobObject(task.job, JobObjectBasicProcessIdList, ids, static_cast<DWORD>(data.size()), nullptr)) return false;
+        using Suspend = LONG (NTAPI*)(HANDLE);
+        auto address = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), action == 1 ? "NtSuspendProcess" : "NtResumeProcess");
+        Suspend suspend = nullptr;
+        static_assert(sizeof(suspend) == sizeof(address), "Function pointer size");
+        memcpy(&suspend, &address, sizeof(suspend));
+        if (action != 3 && (!suspend || (action == 1) == task.paused)) return false;
+        bool ok = true;
+        for (DWORD i = 0; i < ids->NumberOfProcessIdsInList; ++i)
+        {
+            HANDLE process = OpenProcess(PROCESS_SET_INFORMATION | 0x0800, FALSE, static_cast<DWORD>(ids->ProcessIdList[i]));
+            if (!process) { ok = false; continue; }
+            if (action == 3) ok = SetPriorityClass(process, Priority(priority)) && ok;
+            else ok = (suspend(process) >= 0) && ok;
+            CloseHandle(process);
+        }
+        if (action == 1) task.paused = true;
+        if (action == 2) task.paused = false;
+        return ok;
+    }
+
+private:
+    bool stopping = false;
+    std::thread worker;
+    void Work()
+    {
+        while (true)
+        {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (stopping) return;
+                int running = 0;
+                for (auto& task : tasks)
+                {
+                    if (task->state != "running") continue;
+                    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION info{};
+                    if (!QueryInformationJobObject(task->job, JobObjectBasicAccountingInformation, &info, sizeof(info), nullptr) || info.ActiveProcesses != 0)
+                    { if (!task->paused) ++running; continue; }
+                    GetExitCodeProcess(task->process, &task->result);
+                    task->state = task->result == 0 ? "done" : "failed";
+                    if (task->result == 0 && task->command.find(L"winget install ") != std::wstring::npos)
+                    {
+                        std::string command(task->command.begin(), task->command.end());
+                        RegisterInstalledToolPaths(command);
+                        RefreshEnvironmentPath();
+                    }
+                }
+                while (running < parallel)
+                {
+                    std::shared_ptr<Task> next;
+                    for (auto& task : tasks)
+                        if (task->state == "waiting" && !task->paused && (!next || task->priority > next->priority)) next = task;
+                    if (!next) break;
+                    Start(*next);
+                    if (next->state == "running") ++running;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+    }
+
+    void Start(Task& task)
+    {
+        SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
+        HANDLE log = CreateFileW(task.log.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &security, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        HANDLE input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, nullptr);
+        task.job = CreateJobObjectW(nullptr, nullptr);
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        bool ready = log != INVALID_HANDLE_VALUE && input != INVALID_HANDLE_VALUE && task.job &&
+            SetInformationJobObject(task.job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        startup.dwFlags = STARTF_USESTDHANDLES;
+        startup.hStdInput = input;
+        startup.hStdOutput = startup.hStdError = log;
+        PROCESS_INFORMATION process{};
+        std::wstring command = task.command;
+        bool created = ready && CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE,
+            CREATE_NO_WINDOW | CREATE_SUSPENDED | Priority(task.priority), nullptr, nullptr, &startup, &process);
+        if (created && AssignProcessToJobObject(task.job, process.hProcess))
+        {
+            task.process = process.hProcess;
+            task.state = "running";
+            ResumeThread(process.hThread);
+        }
+        else
+        {
+            task.result = GetLastError();
+            task.state = "failed";
+            if (created) { TerminateProcess(process.hProcess, ERROR_CANCELLED); CloseHandle(process.hProcess); }
+        }
+        if (process.hThread) CloseHandle(process.hThread);
+        if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
+        if (input != INVALID_HANDLE_VALUE) CloseHandle(input);
+    }
+};
+
+TaskQueue& GetTaskQueue() { static TaskQueue queue; return queue; }
+
+void TaskQueueMenu()
+{
+    auto& queue = GetTaskQueue();
+    while (true)
+    {
+        {
+            std::lock_guard<std::mutex> lock(queue.mutex);
+            std::cout << "\n=== 后台任务队列 ===\n退出工具箱将结束未完成的队列任务。\n后台提交: " << (queue.enabled ? "开" : "关") << "  并发: " << queue.parallel << "\n";
+            for (const auto& task : queue.tasks)
+                std::cout << task->id << ". " << task->state << (task->paused ? " [暂停]" : "")
+                          << " 优先级=" << task->priority << " 返回码=" << task->result << "\n";
+        }
+        std::cout << "1. 切换后台提交  2. 暂停  3. 继续  4. 优先级  5. 日志  6. 并发数  0. 返回\n";
+        std::string line;
+        if (!std::getline(std::cin, line) || line == "0") return;
+        if (line == "1") { queue.enabled = !queue.enabled; continue; }
+        if (line == "6")
+        {
+            std::cout << "并发数（1-8）: ";
+            std::getline(std::cin, line);
+            if (line.size() == 1 && line[0] >= '1' && line[0] <= '8')
+            { std::lock_guard<std::mutex> lock(queue.mutex); queue.parallel = line[0] - '0'; }
+            continue;
+        }
+        const std::string action = line;
+        std::cout << "任务 ID: ";
+        if (!std::getline(std::cin, line)) return;
+        int id = 0;
+        try { size_t end; id = std::stoi(line, &end); if (end != line.size()) continue; } catch (...) { continue; }
+        if (action == "5")
+        {
+            std::lock_guard<std::mutex> lock(queue.mutex);
+            if (id > 0 && id <= static_cast<int>(queue.tasks.size()))
+                ShellExecuteW(nullptr, L"open", L"notepad.exe", (L"\"" + queue.tasks[id-1]->log + L"\"").c_str(), nullptr, SW_SHOW);
+        }
+        else if (action == "2" || action == "3" || action == "4")
+        {
+            int priority = 1;
+            if (action == "4")
+            {
+                std::cout << "优先级 0=低 1=普通 2=高: ";
+                std::getline(std::cin, line);
+                if (line.size() != 1 || line[0] < '0' || line[0] > '2') continue;
+                priority = line[0] - '0';
+            }
+            if (!queue.Control(id, action == "2" ? 1 : action == "3" ? 2 : 3, priority))
+                std::cout << "操作失败或任务已结束。\n";
+        }
+    }
+}
+
 
 std::wstring Utf8Command(const std::string& text)
 {
@@ -356,6 +593,8 @@ bool GetLatestReleaseInfo(std::string& tagName, std::string& downloadUrl, std::s
 std::wstring QuoteProcessArgument(const std::wstring& argument);
 bool DownloadWithFastdl(const std::string& url, const std::string& destination, bool background = false);
 void FastdlMenu();
+void DisktoolDlcMenu();
+void VolumeMountMenu();
 std::string GetFileSHA256(const std::string& filePath);
 std::string GetLocalExeHash();
 std::string GetRemoteExeHash(const std::string& zipPath);
@@ -643,7 +882,7 @@ int main()
             std::cout << "27. 文档格式转换\n";
             std::cout << "28. 哈希工具\n";
             std::cout << "29. 进制转换工具\n";
-            std::cout << "30. 磁盘检查控制（禁止chkdsk）\n";
+            std::cout << "30. 磁盘开机检查控制\n";
         }
         else
         {
@@ -677,12 +916,14 @@ int main()
             std::cout << "27. 文档格式转换\n";
             std::cout << "28. 哈希工具\n";
             std::cout << "29. 进制转换工具\n";
-             std::cout << "30. 磁盘检查控制（禁止chkdsk）\n";
+             std::cout << "30. 磁盘开机检查控制\n";
         }
 
         std::cout << "----------------------------------------\n";
         std::cout << "31. 后台任务队列控制\n";
         std::cout << "32. fastdl 高速下载器\n";
+        std::cout << "33. DiskTool DLC\n";
+        std::cout << "34. 卷与镜像挂载管理\n";
         std::cout << "90. 切换在线/离线模式\n";
         std::cout << " 0. 退出程序\n";
         std::cout << "========================================\n";
@@ -740,6 +981,8 @@ int main()
             case 30: ChkdskControlMenu(); break;
             case 31: TaskQueueMenu(); RefreshEnvironmentPath(); break;
             case 32: FastdlMenu(); break;
+            case 33: DisktoolDlcMenu(); break;
+            case 34: VolumeMountMenu(); break;
 
             case 90:  // 切换模式
                 ToggleMode();
@@ -7445,7 +7688,7 @@ std::string GetLocalExeHash()
     DWORD length = GetModuleFileNameW(NULL, exePath, MAX_PATH);
     if (length == 0 || length >= MAX_PATH)
         return "";
-    return GetFileSHA256(std::filesystem::path(exePath).u8string());
+    return GetFileSHA256(PathToUtf8(std::filesystem::path(exePath)));
 }
 
 std::string GetBuildIdentity()
@@ -7481,11 +7724,8 @@ std::string GetRemoteExeHash(const std::string& zipPath)
 
 std::string GetLastVersionFile()
 {
-    wchar_t exePath[MAX_PATH];
-    DWORD length = GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    if (length == 0 || length >= MAX_PATH)
-        return "";
-    return (std::filesystem::path(exePath).parent_path() / L"last_version.txt").u8string();
+    auto directory = GetToolboxDataDirectory();
+    return directory.empty() ? "" : PathToUtf8(directory / L"last_version.txt");
 }
 
 // 读取上次版本
@@ -7656,7 +7896,7 @@ try {
     New-Item -ItemType Directory -Path $stage,$backup -Force | Out-Null
     $archive=[IO.Compression.ZipFile]::OpenRead($Zip)
     try {
-        $names=@('system-toolbox.exe','music-converter.exe','fastdl.exe','PsExec64.exe','README.md','MUSIC-CONVERTER-LICENSE.txt','MUSIC-CONVERTER-NOTICE.md','FASTDL-LICENSE.txt','FASTDL-NOTICE.md')
+        $names=@('system-toolbox.exe','music-converter.exe','fastdl.exe','PsExec64.exe','README.md','MUSIC-CONVERTER-LICENSE.txt','MUSIC-CONVERTER-NOTICE.md','FASTDL-LICENSE.txt','FASTDL-NOTICE.md','MUSIC-CONVERTER-LICENSE.md','FASTDL-LICENSE.md')
         foreach ($name in $names) {
             $entries=@($archive.Entries | Where-Object { $_.Name -eq $name })
             if ($entries.Count -gt 1) { throw "Duplicate package entry: $name" }
@@ -7667,7 +7907,7 @@ try {
     if ((Get-FileHash -LiteralPath $program -Algorithm SHA256).Hash -ne $Hash) { throw 'Executable hash mismatch' }
     $files=@(Get-ChildItem -LiteralPath $stage -File | Sort-Object { $_.Name -eq 'system-toolbox.exe' })
     foreach ($file in $files) {
-        $dest=if ($file.Name -eq 'system-toolbox.exe') { $Target } else { Join-Path $root $file.Name }
+        $dest=if ($file.Name -eq 'system-toolbox.exe') { $Target } else { Join-Path $root ($file.Name -replace '-LICENSE\.txt$','-LICENSE.md') }
         $saved=Join-Path $backup $file.Name
         if (Test-Path -LiteralPath $dest) { Copy-Item -LiteralPath $dest -Destination $saved -Force }
         $changed+=@{Destination=$dest;Backup=$saved}
@@ -7737,7 +7977,7 @@ void SoftwareUpdate()
     if (!tempLength || tempLength >= MAX_PATH || !GetTempFileNameW(tempPath, L"stu", 0, unique)) { Pause(); return; }
     DeleteFileW(unique);
     if (!CreateDirectoryW(unique, nullptr)) { Pause(); return; }
-    std::string updateDir = std::filesystem::path(unique).u8string();
+    std::string updateDir = PathToUtf8(std::filesystem::path(unique));
 
     std::string zipPath = updateDir + "\\update.zip";
 
@@ -8859,8 +9099,8 @@ void MediaToolsMenu()
                     Pause();
                     break;
                 }
-                bool converted = RunFFmpeg("ffmpeg -v error -i \"" + decoded.u8string() +
-                                           "\" -vn -c:a libmp3lame -q:a 2 -y \"" + encoded.u8string() + "\"", true);
+                bool converted = RunFFmpeg("ffmpeg -v error -i \"" + PathToUtf8(decoded) +
+                                           "\" -vn -c:a libmp3lame -q:a 2 -y \"" + PathToUtf8(encoded) + "\"", true);
                 std::filesystem::remove(decoded, ec);
                 if (!converted || !std::filesystem::exists(encoded, ec) || std::filesystem::file_size(encoded, ec) == 0)
                 {
@@ -8875,7 +9115,7 @@ void MediaToolsMenu()
                     std::cout << "[错误] 无法保存输出文件。\n";
                 }
                 else
-                    std::cout << "[完成] 已生成 MP3: " << destination.u8string() << "\n";
+                    std::cout << "[完成] 已生成 MP3: " << PathToUtf8(destination) << "\n";
                 Pause();
                 break;
             }
@@ -8898,23 +9138,23 @@ void MediaToolsMenu()
                 }
                 inputPath = std::filesystem::absolute(inputPath, ec);
                 if (ec) { std::cout << "[错误] 无法读取输入路径。\n"; Pause(); break; }
-                src = inputPath.u8string();
+                src = PathToUtf8(inputPath);
                 std::string output = UnquotePath(GetInput("输出目录（留空使用输入旁的 converted 文件夹）: "));
                 if (output.empty())
                 {
                     auto base = std::filesystem::is_directory(inputPath, ec) ? inputPath : inputPath.parent_path();
-                    output = (base / "converted").u8string();
+                    output = PathToUtf8(base / "converted");
                 }
                 auto outputPath = std::filesystem::absolute(std::filesystem::u8path(output), ec);
                 if (ec) { std::cout << "[错误] 无法读取输出路径。\n"; Pause(); break; }
-                output = outputPath.u8string();
+                output = PathToUtf8(outputPath);
                 std::string ekey = GetInput("QQ 音乐 EKey（可选，留空跳过）: ");
                 std::string keyDatabase = UnquotePath(GetInput("QQ 音乐密钥库路径（可选，留空跳过）: "));
                 if (!keyDatabase.empty())
                 {
                     auto keyPath = std::filesystem::absolute(std::filesystem::u8path(keyDatabase), ec);
                     if (ec) { std::cout << "[错误] 无法读取密钥库路径。\n"; Pause(); break; }
-                    keyDatabase = keyPath.u8string();
+                    keyDatabase = PathToUtf8(keyPath);
                 }
                 if (!RunMusicConverter(src, output, ekey, keyDatabase))
                     std::cout << "[错误] 转换未全部成功，请查看上面的原因。\n";
@@ -10822,7 +11062,7 @@ void BaseConverterMenu()
             while (!error && files != std::filesystem::directory_iterator())
             {
                 auto path = files->path();
-                std::string name = path.filename().u8string();
+                std::string name = PathToUtf8(path.filename());
                 if (files->is_regular_file(error) &&
                     (name.size() < suffix.size() || name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0))
                     sources.push_back(path);
@@ -10835,7 +11075,7 @@ void BaseConverterMenu()
             {
                 for (const auto &path : sources)
                 {
-                    std::string src = path.u8string();
+                    std::string src = PathToUtf8(path);
                     std::cout << (ConvertFileBase(src, src + suffix, base, false) ? "[OK] " : "[FAIL] ") << src << "\n";
                 }
             }
@@ -10880,388 +11120,401 @@ void BaseConverterMenu()
     }
 }
 
-// ==================== 强行禁止 chkdsk ====================
-
-// 强行终止 chkdsk 进程
-void KillChkdskProcesses()
+bool ParseDriveList(const std::string& input, std::vector<wchar_t>& drives)
 {
-    std::cout << "\n[1/6] 强行终止 chkdsk 进程...\n";
-    system("taskkill /f /im chkdsk.exe >nul 2>&1");
-    system("taskkill /f /im autochk.exe >nul 2>&1");
-    system("taskkill /f /im chkntfs.exe >nul 2>&1");
-    std::cout << "  ✓ chkdsk.exe / autochk.exe / chkntfs.exe 已终止\n";
-}
-
-// 取消指定卷的 dirty bit
-void ClearDirtyBitForDrive(const std::string& drive)
-{
-    std::cout << "\n[2/6] 取消 " << drive << " 的 dirty bit...\n";
-
-    std::string queryCmd = "fsutil dirty query " + drive + " >nul 2>&1";
-    if (system(queryCmd.c_str()) == 0)
+    drives.clear();
+    if (input.empty() || input.back() == ',') return false;
+    std::istringstream values(input);
+    std::string value;
+    while (std::getline(values, value, ','))
     {
-        std::string chkntfsCmd = "chkntfs /x " + drive + " >nul 2>&1";
-        system(chkntfsCmd.c_str());
-        std::cout << "  ✓ " << drive << " 已从检查列表移除\n";
+        size_t first = value.find_first_not_of(" \t");
+        size_t last = value.find_last_not_of(" \t");
+        if (first == std::string::npos) return false;
+        value = value.substr(first, last - first + 1);
+        if (value.size() > 1 && value.substr(1) != ":" && value.substr(1) != ":\\") return false;
+        char drive = value[0];
+        if (drive >= 'a' && drive <= 'z') drive -= 'a' - 'A';
+        if (drive < 'A' || drive > 'Z') return false;
+        if (std::find(drives.begin(), drives.end(), drive) == drives.end()) drives.push_back(drive);
     }
-    else
+    return !drives.empty();
+}
+
+wchar_t BootVolumeLetter(const std::wstring& token)
+{
+    std::wstring value = token;
+    if (value.rfind(L"\\??\\", 0) == 0) value.erase(0, 4);
+    if (value.size() != 2 || value[1] != L':') return 0;
+    wchar_t letter = static_cast<wchar_t>(std::towupper(value[0]));
+    return letter >= L'A' && letter <= L'Z' ? letter : 0;
+}
+
+bool TransformBootExecute(const std::vector<std::wstring>& original, const std::vector<wchar_t>& targets,
+                          bool disable, std::vector<std::wstring>& updated,
+                          const std::vector<std::wstring>& volumeAliases = {}, bool repairEmpty = false)
+{
+    updated.clear();
+    if (original.empty() && repairEmpty)
+        return TransformBootExecute({L"autocheck autochk *"}, targets, disable, updated, volumeAliases);
+    if (targets.empty()) return false;
+    for (wchar_t target : targets) if (target < L'A' || target > L'Z') return false;
+    bool wildcard = false;
+    for (const auto& entry : original)
     {
-        std::cout << "  [跳过] " << drive << " 无法查询 dirty 状态\n";
+        std::wistringstream input(entry);
+        std::vector<std::wstring> tokens;
+        std::wstring token;
+        while (input >> token) tokens.push_back(token);
+        if (tokens.size() < 3 || _wcsicmp(tokens[0].c_str(), L"autocheck") || _wcsicmp(tokens[1].c_str(), L"autochk"))
+        { updated.push_back(entry); continue; }
+        bool star = std::find(tokens.begin() + 2, tokens.end(), L"*") != tokens.end();
+        wildcard = wildcard || star;
+        if (star)
+        {
+            std::wstring excluded;
+            std::vector<std::wstring> kept{tokens[0], tokens[1]};
+            for (size_t i = 2; i < tokens.size(); ++i)
+            {
+                if (tokens[i].size() >= 3 && _wcsnicmp(tokens[i].c_str(), L"/k:", 3) == 0)
+                {
+                    for (wchar_t letter : tokens[i].substr(3))
+                    {
+                        letter = static_cast<wchar_t>(std::towupper(letter));
+                        if (letter < L'A' || letter > L'Z') return false;
+                        if (excluded.find(letter) == std::wstring::npos) excluded += letter;
+                    }
+                }
+                else kept.push_back(tokens[i]);
+            }
+            for (wchar_t target : targets)
+            {
+                auto position = excluded.find(target);
+                if (disable && position == std::wstring::npos) excluded += target;
+                if (!disable && position != std::wstring::npos) excluded.erase(position, 1);
+            }
+            if (!excluded.empty()) kept.insert(kept.begin() + 2, L"/k:" + excluded);
+            tokens = std::move(kept);
+        }
+        else if (disable)
+        {
+            bool removed = false, otherVolume = false;
+            std::vector<std::wstring> kept{tokens[0], tokens[1]};
+            for (size_t i = 2; i < tokens.size(); ++i)
+            {
+                wchar_t letter = BootVolumeLetter(tokens[i]);
+                bool selected = letter && std::find(targets.begin(), targets.end(), letter) != targets.end();
+                auto normalize = [](std::wstring value)
+                {
+                    if (value.rfind(L"\\??\\", 0) == 0 || value.rfind(L"\\\\?\\", 0) == 0) value.erase(0, 4);
+                    if (!value.empty() && value.back() == L'\\') value.pop_back();
+                    return value;
+                };
+                for (const auto& alias : volumeAliases)
+                    selected = selected || !_wcsicmp(normalize(tokens[i]).c_str(), normalize(alias).c_str());
+                if (selected)
+                { removed = true; continue; }
+                if (letter || tokens[i].rfind(L"\\??\\", 0) == 0 || tokens[i].rfind(L"\\\\?\\", 0) == 0) otherVolume = true;
+                kept.push_back(tokens[i]);
+            }
+            if (!removed) { updated.push_back(entry); continue; }
+            if (!otherVolume) continue;
+            tokens = std::move(kept);
+        }
+        else { updated.push_back(entry); continue; }
+        std::wstring replacement;
+        for (const auto& item : tokens) { if (!replacement.empty()) replacement += L' '; replacement += item; }
+        updated.push_back(replacement);
     }
+    return wildcard;
 }
 
-// 取消指定卷的 chkntfs 计划检查
-void DisableChkntfsForDrive(const std::string& drive)
+bool ReadBootExecute(HKEY key, std::vector<wchar_t>& data)
 {
-    std::cout << "\n[3/6] 取消 " << drive << " 的计划检查...\n";
-    std::string cmd = "chkntfs /x " + drive + " >nul 2>&1";
-    system(cmd.c_str());
-    std::cout << "  ✓ " << drive << " 已取消\n";
+    DWORD type = 0, size = 0;
+    if (RegQueryValueExW(key, L"BootExecute", nullptr, &type, nullptr, &size) != ERROR_SUCCESS ||
+        type != REG_MULTI_SZ || size > 1024 * 1024 || size % sizeof(wchar_t)) return false;
+    data.assign(std::max<size_t>(2, size / sizeof(wchar_t)), L'\0');
+    if (RegQueryValueExW(key, L"BootExecute", nullptr, &type, reinterpret_cast<BYTE*>(data.data()), &size) != ERROR_SUCCESS ||
+        type != REG_MULTI_SZ || size > data.size() * sizeof(wchar_t) || size % sizeof(wchar_t)) return false;
+    data.resize(std::max<size_t>(2, size / sizeof(wchar_t)));
+    return data[data.size()-1] == 0 && data[data.size()-2] == 0;
 }
 
-// 清空 BootExecute
-void ClearBootExecute()
+bool SetSelectedVolumeAutoCheck(const std::vector<wchar_t>& targets, bool disable, bool repairEmpty = false)
 {
-    std::cout << "\n[4/6] 清空 BootExecute 开机检查...\n";
-
-    std::string cmd = "reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\" /v BootExecute /t REG_MULTI_SZ /d \"\" /f";
-    int ret = system(cmd.c_str());
-
-    if (ret == 0)
-        std::cout << "  ✓ BootExecute 已清空\n";
-    else
-        std::cout << "  ✗ BootExecute 清空失败\n";
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Session Manager", 0,
+                      KEY_QUERY_VALUE | KEY_SET_VALUE, &key) != ERROR_SUCCESS) return false;
+    auto apply = [&]() -> bool
+    {
+        std::vector<wchar_t> data;
+        if (!ReadBootExecute(key, data)) return false;
+        std::vector<std::wstring> original, updated;
+        for (size_t i = 0; i + 1 < data.size() && data[i]; )
+        {
+            std::wstring entry(data.data() + i);
+            original.push_back(entry);
+            i += entry.size() + 1;
+        }
+        std::vector<std::wstring> aliases;
+        for (wchar_t drive : targets)
+        {
+            wchar_t volume[MAX_PATH];
+            std::wstring root = std::wstring(1, drive) + L":\\";
+            if (!GetVolumeNameForVolumeMountPointW(root.c_str(), volume, MAX_PATH)) return false;
+            aliases.emplace_back(volume);
+        }
+        if (!TransformBootExecute(original, targets, disable, updated, aliases, repairEmpty))
+        {
+            std::cout << "启动检查配置缺少标准通配条目或格式未知，已保留原配置；请先检查旧版全局修改。\n";
+            return false;
+        }
+        auto backupDirectory = GetToolboxDataDirectory();
+        if (backupDirectory.empty()) return false;
+        backupDirectory /= L"backups";
+        std::error_code error;
+        std::filesystem::create_directories(backupDirectory, error);
+        if (error) return false;
+        auto backup = backupDirectory / (L"BootExecute-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) + L".bin");
+        std::ofstream output(backup, std::ios::binary);
+        output.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size() * sizeof(wchar_t)));
+        output.close();
+        if (!output) return false;
+        std::vector<wchar_t> fresh;
+        if (!ReadBootExecute(key, fresh) || fresh != data) return false;
+        std::vector<wchar_t> replacement;
+        for (const auto& entry : updated)
+        { replacement.insert(replacement.end(), entry.begin(), entry.end()); replacement.push_back(0); }
+        replacement.push_back(0);
+        if (RegSetValueExW(key, L"BootExecute", 0, REG_MULTI_SZ, reinterpret_cast<const BYTE*>(replacement.data()),
+                          static_cast<DWORD>(replacement.size() * sizeof(wchar_t))) != ERROR_SUCCESS) return false;
+        std::cout << "原配置备份: " << PathToUtf8(backup) << "\n";
+        return true;
+    };
+    bool ok = apply();
+    RegCloseKey(key);
+    return ok;
 }
 
-// 禁止 NTFS 自动校验
-void DisableNtfsSelfHeal()
-{
-    std::cout << "\n[5/6] 禁止文件系统自动校验...\n";
-
-    system("reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\" /v NtfsDisableLastAccessUpdate /t REG_DWORD /d 1 /f >nul 2>&1");
-    system("reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\" /v NtfsDisableSelfHeal /t REG_DWORD /d 1 /f >nul 2>&1");
-    system("reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\" /v NtfsDisableVolsnapDiag /t REG_DWORD /d 1 /f >nul 2>&1");
-
-    std::cout << "  ✓ 已禁止 NTFS 自愈\n";
-    std::cout << "  ✓ 已禁止损坏自动触发 chkdsk\n";
-}
-
-// 禁止指定卷的自动校验
-void DisableVolumeAutoCheckForDrive(const std::string& drive)
-{
-    std::cout << "\n[6/6] 禁止 " << drive << " 的挂载校验...\n";
-
-    std::string cmd1 = "fsutil repair set " + drive + " 0 >nul 2>&1";
-    system(cmd1.c_str());
-
-    std::string cmd3 = "chkntfs /x " + drive + " >nul 2>&1";
-    system(cmd3.c_str());
-
-    std::cout << "  ✓ " << drive << " 已禁止挂载校验和自愈\n";
-}
-
-// 禁用 WinRE 自动修复
-void DisableWinREAutoRepair()
-{
-    std::cout << "\n[附加] 禁用 WinRE 自动修复...\n";
-    system("reagentc /disable >nul 2>&1");
-    system("bcdedit /set recoveryenabled No >nul 2>&1");
-    system("bcdedit /set {default} bootstatuspolicy ignoreallfailures >nul 2>&1");
-    std::cout << "  ✓ WinRE 自动修复已禁用\n";
-}
-
-// 获取所有可用磁盘列表
 void ShowAvailableDrives()
 {
-    std::cout << "\n可用磁盘：\n";
-    DWORD drives = GetLogicalDrives();
-    for (char c = 'A'; c <= 'Z'; c++)
-    {
-        if (drives & (1 << (c - 'A')))
-        {
-            std::string root = std::string(1, c) + ":\\";
-            UINT type = GetDriveTypeA(root.c_str());
-            const char* typeStr = "未知";
-            switch (type)
-            {
-                case DRIVE_FIXED: typeStr = "本地磁盘"; break;
-                case DRIVE_REMOVABLE: typeStr = "可移动"; break;
-                case DRIVE_CDROM: typeStr = "光驱"; break;
-                case DRIVE_REMOTE: typeStr = "网络"; break;
-                case DRIVE_RAMDISK: typeStr = "RAM"; break;
-            }
-            std::cout << "  " << c << ":  " << typeStr << "\n";
-        }
-    }
+    DWORD mask = GetLogicalDrives();
+    std::cout << "可用盘符: ";
+    for (wchar_t drive = L'A'; drive <= L'Z'; ++drive)
+        if (mask & (1u << (drive-L'A'))) std::cout << static_cast<char>(drive) << ": ";
+    std::cout << "\n";
 }
 
-// 主函数：强行禁止 chkdsk（支持选择磁盘）
-void ForceDisableChkdsk()
+void ChangeSelectedChkdsk(bool disable, bool repairEmpty = false)
 {
     ClearScreen();
-    std::cout << "╔════════════════════════════════════════════════╗\n";
-    std::cout << "║      ⚠️  强行禁止 chkdsk / 磁盘校验  ⚠️         ║\n";
-    std::cout << "╚════════════════════════════════════════════════╝\n\n";
-
-    // 显示磁盘
     ShowAvailableDrives();
+    std::vector<wchar_t> drives;
+    if (!ParseDriveList(GetInput("输入目标盘符，多个用逗号分隔（如 D,E；留空取消）: "), drives)) return;
+    for (wchar_t drive : drives)
+        if (!(GetLogicalDrives() & (1u << (drive-L'A')))) { std::cout << "盘符不存在，已取消。\n"; Pause(); return; }
+    std::cout << "目标卷: ";
+    for (wchar_t drive : drives) std::cout << static_cast<char>(drive) << ": ";
     std::cout << "\n";
-
-    std::cout << "请选择操作范围：\n";
-    std::cout << " 1. 指定单个磁盘\n";
-    std::cout << " 2. 指定多个磁盘（用逗号分隔）\n";
-    std::cout << " 3. 所有磁盘\n";
-    std::cout << " 0. 取消\n";
-    int range = GetIntInput("请选择: ");
-
-    if (range == 0) { Pause(); return; }
-
-    std::vector<std::string> targets;
-
-    if (range == 1)
-    {
-        std::string d = GetInput("请输入盘符（如 C）: ");
-        if (d.empty()) { Pause(); return; }
-        if (d.back() != ':') d += ":";
-        targets.push_back(d);
-    }
-    else if (range == 2)
-    {
-        std::string input = GetInput("请输入盘符列表（如 C,D,E）: ");
-        std::stringstream ss(input);
-        std::string seg;
-        while (std::getline(ss, seg, ','))
-        {
-            // 去空格
-            while (!seg.empty() && seg.front() == ' ') seg.erase(seg.begin());
-            while (!seg.empty() && seg.back() == ' ') seg.pop_back();
-            if (!seg.empty())
-            {
-                if (seg.back() != ':') seg += ":";
-                targets.push_back(seg);
-            }
-        }
-    }
-    else if (range == 3)
-    {
-        DWORD drives = GetLogicalDrives();
-        for (char c = 'A'; c <= 'Z'; c++)
-        {
-            if (drives & (1 << (c - 'A')))
-            {
-                targets.push_back(std::string(1, c) + ":");
-            }
-        }
-    }
-
-    if (targets.empty()) { std::cout << "未选择任何磁盘。\n"; Pause(); return; }
-
-    // ==================== 免责声明 ====================
-    ClearScreen();
-    std::cout << "╔════════════════════════════════════════════════╗\n";
-    std::cout << "║          ⚠️  危险操作警告  ⚠️                  ║\n";
-    std::cout << "╚════════════════════════════════════════════════╝\n\n";
-
-    std::cout << "将对以下磁盘禁止检查：\n";
-    for (const auto& t : targets)
-        std::cout << "  " << t << "\n";
-    std::cout << "\n";
-
-    std::cout << "【免责声明】\n";
-    std::cout << "- 磁盘可能存在未修复的错误，强行禁止可能导致数据丢失。\n";
-    std::cout << "- 系统文件损坏时，开机检查是重要的自修复机制。\n";
-    std::cout << "- 此操作后系统将不再自动检查磁盘。\n";
-    std::cout << "- 作者不对使用本功能造成的任何损失负责。\n\n";
-
-    std::cout << "════════════════════════════════════════════════\n";
-    std::cout << "输入 DISABLE（大写）确认执行: ";
-
-    std::string confirm;
-    std::getline(std::cin, confirm);
-
-    if (confirm != "DISABLE")
-    {
-        std::cout << "\n[已取消] 操作终止。\n";
-        Pause();
-        return;
-    }
-
-    // ==================== 执行 ====================
-    std::cout << "\n[执行] 开始强行禁止 chkdsk...\n";
-
-    KillChkdskProcesses();
-
-    for (const auto& d : targets)
-    {
-        ClearDirtyBitForDrive(d);
-        DisableChkntfsForDrive(d);
-        DisableVolumeAutoCheckForDrive(d);
-    }
-
-    ClearBootExecute();
-    DisableNtfsSelfHeal();
-    DisableWinREAutoRepair();
-
-    std::cout << "\n════════════════════════════════════════════════\n";
-    std::cout << "  ✓ 所有操作已完成。\n";
-    std::cout << "  ✓ 重启后不会再触发磁盘检查。\n";
-    std::cout << "════════════════════════════════════════════════\n";
-
+    if (repairEmpty) std::cout << "若旧版已清空启动检查入口，将恢复 Windows 默认入口，并仅排除下面选择的卷；其他卷恢复默认自动检查。\n";
+    std::cout << (disable ? "将关闭所选卷的开机自动检查。未修复的卷错误将继续存在。\n" : "将恢复所选卷的开机自动检查。\n");
+    if (GetInput("输入 YES 确认: ") != "YES") return;
+    bool ok = SetSelectedVolumeAutoCheck(drives, disable, repairEmpty);
+    std::cout << (ok ? "所选卷配置已更新。\n" : "操作失败，未报告成功；请检查权限及当前启动配置。\n");
     Pause();
 }
 
-// 恢复开机检查（支持选择磁盘）
-void RestoreChkdsk()
-{
-    ClearScreen();
-    std::cout << "========== 恢复开机磁盘检查 ==========\n";
-
-    ShowAvailableDrives();
-    std::cout << "\n";
-
-    std::cout << " 1. 指定单个磁盘\n";
-    std::cout << " 2. 指定多个磁盘\n";
-    std::cout << " 3. 所有磁盘\n";
-    std::cout << " 0. 取消\n";
-    int range = GetIntInput("请选择: ");
-
-    if (range == 0) { Pause(); return; }
-
-    std::vector<std::string> targets;
-
-    if (range == 1)
-    {
-        std::string d = GetInput("盘符（如 C）: ");
-        if (!d.empty()) { if (d.back() != ':') d += ":"; targets.push_back(d); }
-    }
-    else if (range == 2)
-    {
-        std::string input = GetInput("盘符列表（如 C,D,E）: ");
-        std::stringstream ss(input);
-        std::string seg;
-        while (std::getline(ss, seg, ','))
-        {
-            while (!seg.empty() && seg.front() == ' ') seg.erase(seg.begin());
-            while (!seg.empty() && seg.back() == ' ') seg.pop_back();
-            if (!seg.empty()) { if (seg.back() != ':') seg += ":"; targets.push_back(seg); }
-        }
-    }
-    else if (range == 3)
-    {
-        DWORD drives = GetLogicalDrives();
-        for (char c = 'A'; c <= 'Z'; c++)
-            if (drives & (1 << (c - 'A'))) targets.push_back(std::string(1, c) + ":");
-    }
-
-    if (targets.empty()) { std::cout << "未选择任何磁盘。\n"; Pause(); return; }
-
-    // 恢复 BootExecute
-    std::cout << "\n[1/3] 恢复 BootExecute...\n";
-    system("reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\" /v BootExecute /t REG_MULTI_SZ /d \"autocheck autochk *\" /f >nul 2>&1");
-    std::cout << "  ✓ 已恢复\n";
-
-    // 恢复指定磁盘
-    std::cout << "\n[2/3] 恢复 chkntfs 自动检查...\n";
-    for (const auto& d : targets)
-    {
-        std::string cmd = "chkntfs /c " + d + " >nul 2>&1";
-        system(cmd.c_str());
-        std::cout << "  ✓ " << d << " 已恢复\n";
-    }
-
-    // 恢复 NTFS 自愈
-    std::cout << "\n[3/3] 恢复 NTFS 自愈...\n";
-    system("reg delete \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\" /v NtfsDisableSelfHeal /f >nul 2>&1");
-    system("reg delete \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\" /v NtfsDisableVolsnapDiag /f >nul 2>&1");
-    system("reagentc /enable >nul 2>&1");
-    system("bcdedit /set recoveryenabled Yes >nul 2>&1");
-    system("bcdedit /set {default} bootstatuspolicy displayallfailures >nul 2>&1");
-    std::cout << "  ✓ 已恢复\n";
-
-    std::cout << "\n════════════════════════════════════════════════\n";
-    std::cout << "  ✓ 恢复完成。\n";
-    std::cout << "════════════════════════════════════════════════\n";
-
-    Pause();
-}
-
-// 查看指定磁盘的 chkdsk 状态
 void ShowChkdskStatus()
 {
-    ClearScreen();
-    std::cout << "========== chkdsk 状态查询 ==========\n";
-
     ShowAvailableDrives();
-    std::cout << "\n";
-
-    std::string input = GetInput("要查询的盘符（多个用逗号分隔，空=全部）: ");
-
-    std::vector<std::string> targets;
-    if (input.empty())
+    std::vector<wchar_t> drives;
+    if (!ParseDriveList(GetInput("查询盘符（如 C,D）: "), drives)) return;
+    for (wchar_t drive : drives)
     {
-        DWORD drives = GetLogicalDrives();
-        for (char c = 'A'; c <= 'Z'; c++)
-            if (drives & (1 << (c - 'A'))) targets.push_back(std::string(1, c) + ":");
+        std::wstring volume = std::wstring(1, drive) + L":";
+        RunProcessArguments({L"fsutil.exe", L"dirty", L"query", volume});
+        RunProcessArguments({L"chkntfs.exe", volume});
     }
-    else
-    {
-        std::stringstream ss(input);
-        std::string seg;
-        while (std::getline(ss, seg, ','))
-        {
-            while (!seg.empty() && seg.front() == ' ') seg.erase(seg.begin());
-            while (!seg.empty() && seg.back() == ' ') seg.pop_back();
-            if (!seg.empty()) { if (seg.back() != ':') seg += ":"; targets.push_back(seg); }
-        }
-    }
-
-    ClearScreen();
-    std::cout << "========== chkdsk 状态 ==========\n\n";
-
-    std::cout << "=== 全局配置 ===\n";
-    std::cout << "BootExecute:\n";
-    system("reg query \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\" /v BootExecute");
-    std::cout << "\nNTFS 自愈:\n";
-    system("reg query \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\" /v NtfsDisableSelfHeal 2>&1");
-
-    std::cout << "\n=== 各磁盘状态 ===\n";
-    for (const auto& d : targets)
-    {
-        std::cout << "\n--- " << d << " ---\n";
-        std::cout << "dirty 状态: ";
-        system(("fsutil dirty query " + d + " 2>&1").c_str());
-        std::cout << "计划检查: ";
-        system(("chkntfs " + d + " 2>&1").c_str());
-    }
-
     Pause();
 }
 
-// 菜单
 void ChkdskControlMenu()
 {
     while (true)
     {
         ClearScreen();
-        std::cout << "========== 磁盘检查控制 ==========\n";
-        std::cout << " 1. 强行禁止 chkdsk / 磁盘校验\n";
-        std::cout << " 2. 恢复开机检查\n";
-        std::cout << " 3. 查看 chkdsk 状态\n";
-        std::cout << " 0. 返回上级菜单\n";
-        std::cout << "==================================\n";
-
+        std::cout << "=== 按卷控制开机自动检查 ===\n1. 排除指定卷\n2. 恢复指定卷\n3. 查询状态\n4. 修复旧版空配置并仅排除指定卷\n0. 返回\n";
         int choice = GetIntInput("请选择: ");
+        if (choice == 0 || !std::cin) return;
+        if (choice == 1 || choice == 2) ChangeSelectedChkdsk(choice == 1);
+        else if (choice == 3) ShowChkdskStatus();
+        else if (choice == 4) ChangeSelectedChkdsk(true, true);
+    }
+}
 
-        if (choice == 0) break;
+bool IsTrustedDisktoolHash(const std::string& hash)
+{
+    return hash == "2BFA45B23D3C9D03B2044BF41ECBC88D5BF5A7BFF7368A9A1537CC35DCC00230" ||
+           hash == "0C857D7FB1B16DA1404EE7AC58A85C54374A22B4CAE99EA91676C0D67D125F92";
+}
 
-        switch (choice)
+bool InstallDisktoolFile(const std::filesystem::path& source, const std::filesystem::path& destination)
+{
+    if (!IsTrustedDisktoolHash(GetFileSHA256(PathToUtf8(source)))) return false;
+    std::error_code error;
+    if (std::filesystem::equivalent(source, destination, error) && !error) return true;
+    auto staged = destination;
+    staged += L".install-" + std::to_wstring(GetCurrentProcessId());
+    if (!CopyFileW(source.c_str(), staged.c_str(), FALSE)) return false;
+    if (!IsTrustedDisktoolHash(GetFileSHA256(PathToUtf8(staged))))
+    { DeleteFileW(staged.c_str()); return false; }
+    if (!MoveFileExW(staged.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    { DeleteFileW(staged.c_str()); return false; }
+    return true;
+}
+
+void DisktoolDlcMenu()
+{
+    auto directory = GetToolboxDataDirectory();
+    if (directory.empty()) { std::cout << "无法访问 DLC 保存目录。\n"; Pause(); return; }
+    directory /= L"dlc";
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    if (error) { std::cout << "无法创建 DLC 目录。\n"; Pause(); return; }
+    auto program = directory / L"disktool.exe";
+    while (true)
+    {
+        bool installed = IsTrustedDisktoolHash(GetFileSHA256(PathToUtf8(program)));
+        std::cout << "\n=== DiskTool DLC ===\n状态: " << (installed ? "已装载，可启动" : "未安装或校验失败")
+                  << "\n保存目录: " << PathToUtf8(directory) << "\n"
+                  << "1. 下载并安装 DLC\n2. 从本地导入\n3. 启动 DiskTool 菜单\n4. 查看命令帮助\n0. 返回\n";
+        int choice = GetIntInput("请选择: ");
+        if (choice == 0 || !std::cin) return;
+        if (choice == 1)
         {
-            case 1: ForceDisableChkdsk(); break;
-            case 2: RestoreChkdsk(); break;
-            case 3: ShowChkdskStatus(); break;
-            default:
-                std::cout << "无效选项。" << std::endl;
-                Pause();
+            if (!g_bOnlineMode) { std::cout << "当前为离线模式。\n"; continue; }
+            auto download = directory / L"disktool-download.exe";
+            if (!DownloadWithFastdl("https://q23213ddssd.dpdns.org/downloads/disktool.exe", PathToUtf8(download)))
+                std::cout << "下载未完成，已保留原 DLC。\n";
+            else if (!InstallDisktoolFile(download, program))
+                std::cout << "DLC 校验或安装失败，已保留原 DLC。\n";
+            else { DeleteFileW(download.c_str()); std::cout << "DLC 已安装。\n"; }
+        }
+        else if (choice == 2)
+        {
+            std::string file = UnquotePath(GetInput("本地 disktool.exe 路径（留空取消）: "));
+            if (!file.empty())
+                std::cout << (InstallDisktoolFile(std::filesystem::u8path(file), program) ? "DLC 已导入。\n" : "导入失败或不是已核验的 DiskTool 构建。\n");
+        }
+        else if (choice == 3 || choice == 4)
+        {
+            if (!installed) { std::cout << "请先安装并通过校验。\n"; continue; }
+            if (!RunProcessArguments({program.wstring(), choice == 3 ? L"menu" : L"--help"}))
+                std::cout << "DiskTool 返回失败，请查看输出；本地动态构建可能需要 MinGW 运行库。\n";
+            SetUtf8Console();
+        }
+    }
+}
+
+bool IsVolumeGuidPath(const std::wstring& path)
+{
+    if (path.size() != 49 || _wcsnicmp(path.c_str(), L"\\\\?\\Volume", 10) || path.back() != L'\\') return false;
+    GUID guid{};
+    return SUCCEEDED(CLSIDFromString(path.substr(10, 38).c_str(), &guid));
+}
+
+std::wstring NormalizeMountPoint(const std::string& input)
+{
+    std::string value = UnquotePath(input);
+    std::vector<wchar_t> drives;
+    if (ParseDriveList(value, drives) && drives.size() == 1)
+        return std::wstring(1, drives[0]) + L":\\";
+    std::filesystem::path path = std::filesystem::u8path(value);
+    if (!path.is_absolute() || (path.has_filename() && path.filename() == L"..")) return L"";
+    std::wstring normalized = path.lexically_normal().make_preferred().wstring();
+    if (!normalized.empty() && normalized.back() != L'\\') normalized += L'\\';
+    return normalized;
+}
+
+void ListVolumeMounts()
+{
+    std::vector<wchar_t> name(1024);
+    HANDLE search = FindFirstVolumeW(name.data(), static_cast<DWORD>(name.size()));
+    if (search == INVALID_HANDLE_VALUE) { std::cout << "无法枚举卷。\n"; return; }
+    do
+    {
+        std::cout << PathToUtf8(std::filesystem::path(name.data())) << "\n";
+        DWORD needed = 0;
+        GetVolumePathNamesForVolumeNameW(name.data(), nullptr, 0, &needed);
+        if (needed && needed < 1024 * 1024)
+        {
+            std::vector<wchar_t> paths(needed);
+            if (GetVolumePathNamesForVolumeNameW(name.data(), paths.data(), needed, &needed))
+                for (const wchar_t* path = paths.data(); *path; path += wcslen(path) + 1)
+                    std::cout << "  " << PathToUtf8(std::filesystem::path(path)) << "\n";
+        }
+    } while (FindNextVolumeW(search, name.data(), static_cast<DWORD>(name.size())));
+    FindVolumeClose(search);
+}
+
+bool IsProtectedMountPoint(const std::wstring& mount)
+{
+    wchar_t windows[MAX_PATH], systemVolume[MAX_PATH];
+    if (!GetWindowsDirectoryW(windows, MAX_PATH) || !GetVolumePathNameW(windows, systemVolume, MAX_PATH)) return true;
+    if (!_wcsicmp(systemVolume, mount.c_str())) return true;
+    std::vector<wchar_t> exe(32768), volume(32768);
+    if (!GetModuleFileNameW(nullptr, exe.data(), static_cast<DWORD>(exe.size())) ||
+        !GetVolumePathNameW(exe.data(), volume.data(), static_cast<DWORD>(volume.size()))) return true;
+    return !_wcsicmp(volume.data(), mount.c_str());
+}
+
+void VolumeMountMenu()
+{
+    while (true)
+    {
+        std::cout << "\n=== 卷与镜像挂载 ===\n1. 列出卷和挂载点\n2. 挂载 ISO/VHD/VHDX\n3. 卸载镜像\n4. 挂载卷到空目录或空闲盘符\n5. 移除指定挂载点\n0. 返回\n";
+        int choice = GetIntInput("请选择: ");
+        if (choice == 0 || !std::cin) return;
+        if (choice == 1) { ListVolumeMounts(); continue; }
+        if (choice == 2 || choice == 3)
+        {
+            std::string value = UnquotePath(GetInput("镜像文件完整路径: "));
+            if (value.empty()) continue;
+            std::error_code error;
+            auto image = std::filesystem::absolute(std::filesystem::u8path(value), error);
+            if (error || !std::filesystem::is_regular_file(image, error)) { std::cout << "镜像文件不存在。\n"; continue; }
+            std::wstring extension = image.extension().wstring();
+            std::transform(extension.begin(), extension.end(), extension.begin(), [](wchar_t c) { return std::towlower(c); });
+            if (extension != L".iso" && extension != L".vhd" && extension != L".vhdx") { std::cout << "请选择 ISO、VHD 或 VHDX。\n"; continue; }
+            std::string script = "param([string]$Image)\n$ErrorActionPreference='Stop'\n";
+            if (choice == 2)
+            {
+                bool readWrite = extension != L".iso" && GetInput("默认只读；需要读写则输入 RW: ") == "RW";
+                script += "Mount-DiskImage -ImagePath $Image -Access " + std::string(readWrite ? "ReadWrite" : "ReadOnly") + " -PassThru | Format-List ImagePath,Attached,DevicePath\n";
+            }
+            else
+            {
+                if (GetInput("输入 YES 确认卸载镜像: ") != "YES") continue;
+                script += "Dismount-DiskImage -ImagePath $Image\n";
+            }
+            std::cout << (RunPowerShellFile(script, {image.wstring()}) ? "操作完成。\n" : "操作失败，请查看系统返回信息。\n");
+        }
+        else if (choice == 4 || choice == 5)
+        {
+            auto mount = NormalizeMountPoint(GetInput("挂载点（如 X: 或已存在的空 NTFS 目录）: "));
+            if (mount.empty() || IsProtectedMountPoint(mount)) { std::cout << "路径无效或属于系统/工具箱所在卷的根挂载点。\n"; continue; }
+            if (choice == 4)
+            {
+                auto volume = Utf8Command(UnquotePath(GetInput("目标卷 GUID 路径（从列表复制）: ")));
+                if (!IsVolumeGuidPath(volume)) { std::cout << "卷 GUID 路径无效。\n"; continue; }
+                std::cout << (SetVolumeMountPointW(mount.c_str(), volume.c_str()) ? "挂载成功。\n" : "挂载失败，错误码: " + std::to_string(GetLastError()) + "\n");
+            }
+            else
+            {
+                if (GetInput("输入 YES 确认移除此挂载点: ") != "YES") continue;
+                std::cout << (DeleteVolumeMountPointW(mount.c_str()) ? "挂载点已移除。\n" : "移除失败，错误码: " + std::to_string(GetLastError()) + "\n");
+            }
         }
     }
 }

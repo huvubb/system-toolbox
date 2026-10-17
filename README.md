@@ -94,6 +94,8 @@ ctest --test-dir build --output-on-failure
 
 回归测试覆盖整数输入、SHA256、中文路径、更新状态、文件进制及 Base64 往返转换、无效输入保留目标文件、十六进制查看边界。测试不执行磁盘修复、注册表修改或硬件压力测试。GitHub Actions 会使用 MSVC 和 MinGW 分别构建并运行同一套测试。
 
+主 CPP 现已包含队列实现，不再需要额外的 `task-queue.h`。支持 C++17 和 C++20；可用 `-DCMAKE_CXX_STANDARD=20` 配置 CMake。文件路径统一转换为 UTF-8 字节字符串，兼容 C++20 的 `char8_t`。
+
 音乐转码会先请求 FFmpeg 自动选择硬件加速，失败后回退软件解码；常见音频解码器通常仍在 CPU 上运行，不能据此声称已使用 GPU。
 
 ### 后台队列和版本检查
@@ -107,3 +109,13 @@ ctest --test-dir build --output-on-failure
 已集成 `D:\fastdl` 的源码，来源见 [fastdl-integration/UPSTREAM.md](fastdl-integration/UPSTREAM.md)。主菜单 32 提供文件下载及完整 fastdl 菜单（含 ed2k）；网络工具的下载、PsExec 下载和更新附件下载也使用 fastdl。普通文件下载可按主菜单 31 的设置进入后台队列，更新下载保持前台等待，以完成哈希校验。下载支持多线程和断点数据，失败不会覆盖已有目标文件。
 
 完整包包含 `fastdl.exe`，放在工具箱旁；源码运行需安装 `fastdl-integration/requirements.txt`。构建流程自动生成 `system-toolbox-windows.zip` 和 `SHA256SUMS.txt`，发布时将两者附到同一 GitHub Release 即可。更新安装会同步复制附件中的音乐转换器和 fastdl，保留旧文件备份；有后台任务时先完成任务再安装更新。
+
+### DiskTool DLC、挂载与磁盘检查
+
+主菜单 33 可从用户提供的 [DiskTool 下载地址](https://q23213ddssd.dpdns.org/downloads/disktool.exe) 安装 DLC，也可导入 `D:\disktool\build\disktool.exe`。安装和启动时核验已记录构建的 SHA256；校验失败保留原 DLC。EXE 以子进程共享控制台运行，退出后返回主菜单。DLC 存放在 `%LOCALAPPDATA%\SystemToolbox\dlc`，无需放在主程序旁；涉及额外恢复工具或数据库的功能仍需 DiskTool 的配套资源。
+
+主菜单 34 支持列出卷和挂载点、挂载/卸载 ISO/VHD/VHDX、将卷挂载到空目录或空闲盘符、移除单个挂载点。镜像默认只读，VHD/VHDX 可选择读写；不允许移除系统卷或工具箱所在卷的根挂载点。
+
+主菜单 30 仅控制指定卷的开机自动检查：合并既有排除项，恢复时只移除所选卷的排除项，保留其他卷及第三方启动项，并先保存原配置。不会终止全部 chkdsk 进程、清空 BootExecute、修改 WinRE 或全局 NTFS 自愈设置。旧版清空的启动检查配置可通过菜单 30 → 4 显式恢复 Windows 默认入口，同时仅排除所选卷；原值无法推断，非空的未知配置会拒绝覆盖。
+
+运行记录和配置备份存放在 `%LOCALAPPDATA%\SystemToolbox`。安装目录仅需 EXE、主 CPP 和 Markdown 文档；许可证文件使用 `.md` 扩展名。

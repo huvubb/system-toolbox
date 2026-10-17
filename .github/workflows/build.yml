@@ -15,17 +15,22 @@ jobs:
       fail-fast: false
       matrix:
         compiler: [msvc, mingw]
+        include:
+          - compiler: msvc
+            standard: 17
+          - compiler: mingw
+            standard: 20
     steps:
       - uses: actions/checkout@v4
       - name: Configure MSVC
         if: matrix.compiler == 'msvc'
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_CXX_STANDARD=${{ matrix.standard }}
       - name: Configure MinGW
         if: matrix.compiler == 'mingw'
         shell: pwsh
         run: |
           'C:\msys64\mingw64\bin' | Out-File -FilePath $env:GITHUB_PATH -Append
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=C:/msys64/mingw64/bin/g++.exe
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=${{ matrix.standard }} -DCMAKE_CXX_COMPILER=C:/msys64/mingw64/bin/g++.exe
       - name: Build
         run: cmake --build build --config Release --parallel 2
       - name: Test
@@ -43,7 +48,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m PyInstaller --noconfirm --onefile --name music-converter --add-data "music-converter/assets;assets" --distpath build/Release music-converter/unlocker.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Copy-Item music-converter/LICENSE build/Release/MUSIC-CONVERTER-LICENSE.txt
+          Copy-Item music-converter/LICENSE build/Release/MUSIC-CONVERTER-LICENSE.md
           Copy-Item music-converter/UPSTREAM.md build/Release/MUSIC-CONVERTER-NOTICE.md
           $env:MUSIC_CONVERTER_EXECUTABLE = (Resolve-Path build/Release/music-converter.exe).Path
           $env:TOOLBOX_TEST_EXECUTABLE = (Resolve-Path build/Release/toolbox-tests.exe).Path
@@ -58,13 +63,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m PyInstaller --noconfirm --onefile --name fastdl --add-data "fastdl-integration/servers.txt;." --distpath build/Release fastdl-integration/dl.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Copy-Item fastdl-integration/LICENSE build/Release/FASTDL-LICENSE.txt
+          Copy-Item fastdl-integration/LICENSE build/Release/FASTDL-LICENSE.md
           Copy-Item fastdl-integration/UPSTREAM.md build/Release/FASTDL-NOTICE.md
+          Copy-Item README.md build/Release/README.md
           $env:FASTDL_EXECUTABLE = (Resolve-Path build/Release/fastdl.exe).Path
           $env:TOOLBOX_TEST_EXECUTABLE = (Resolve-Path build/Release/toolbox-tests.exe).Path
           python -m pytest fastdl-integration/tests -q
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $names = @('system-toolbox.exe','music-converter.exe','fastdl.exe','MUSIC-CONVERTER-LICENSE.txt','MUSIC-CONVERTER-NOTICE.md','FASTDL-LICENSE.txt','FASTDL-NOTICE.md')
+          $names = @('system-toolbox.exe','music-converter.exe','fastdl.exe','README.md','MUSIC-CONVERTER-LICENSE.md','MUSIC-CONVERTER-NOTICE.md','FASTDL-LICENSE.md','FASTDL-NOTICE.md')
           $hashes = $names | ForEach-Object { $hash = Get-FileHash -LiteralPath "build/Release/$_" -Algorithm SHA256; "$($hash.Hash)  $_" }
           $hashes | Set-Content build/Release/SHA256SUMS.txt -Encoding ascii
           Compress-Archive -Path ($names | ForEach-Object { "build/Release/$_" }) -DestinationPath build/Release/system-toolbox-windows.zip -Force
@@ -74,11 +80,12 @@ jobs:
           name: system-toolbox-windows
           path: |
             build/Release/system-toolbox.exe
+            build/Release/README.md
             build/Release/music-converter.exe
-            build/Release/MUSIC-CONVERTER-LICENSE.txt
+            build/Release/MUSIC-CONVERTER-LICENSE.md
             build/Release/MUSIC-CONVERTER-NOTICE.md
             build/Release/fastdl.exe
-            build/Release/FASTDL-LICENSE.txt
+            build/Release/FASTDL-LICENSE.md
             build/Release/FASTDL-NOTICE.md
             build/Release/SHA256SUMS.txt
             build/Release/system-toolbox-windows.zip

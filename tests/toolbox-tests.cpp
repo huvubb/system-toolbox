@@ -99,8 +99,8 @@ int main()
         GetEnvironmentVariableW(L"TOOLBOX_TEST_DOWNLOAD_URL", url.data(), downloadSize);
         DWORD size = GetEnvironmentVariableW(L"TOOLBOX_TEST_DOWNLOAD_OUTPUT", output.data(), static_cast<DWORD>(output.size()));
         assert(size && size < output.size());
-        return DownloadWithFastdl(std::filesystem::path(url.data()).u8string(),
-                                  std::filesystem::path(output.data()).u8string()) ? 0 : 1;
+        return DownloadWithFastdl(PathToUtf8(std::filesystem::path(url.data())),
+                                  PathToUtf8(std::filesystem::path(output.data()))) ? 0 : 1;
     }
     DWORD musicInputSize = GetEnvironmentVariableW(L"TOOLBOX_TEST_MUSIC_INPUT", nullptr, 0);
     if (musicInputSize)
@@ -110,10 +110,36 @@ int main()
         DWORD outputSize = GetEnvironmentVariableW(L"TOOLBOX_TEST_MUSIC_OUTPUT", musicOutput.data(),
                                                    static_cast<DWORD>(musicOutput.size()));
         assert(outputSize && outputSize < musicOutput.size());
-        return RunMusicConverter(std::filesystem::path(musicInput.data()).u8string(),
-                                 std::filesystem::path(musicOutput.data()).u8string(), "", "") ? 0 : 1;
+        return RunMusicConverter(PathToUtf8(std::filesystem::path(musicInput.data())),
+                                 PathToUtf8(std::filesystem::path(musicOutput.data())), "", "") ? 0 : 1;
     }
     std::wstring path = L"C:\\Tools;C:\\Node";
+    assert(PathToUtf8(std::filesystem::u8path("中文 O'Brien & path")) == "中文 O'Brien & path");
+    std::vector<wchar_t> selected;
+    assert(ParseDriveList(" d, E:,d ", selected) && selected == std::vector<wchar_t>({L'D', L'E'}));
+    for (const std::string input : {"D&whoami", "D,E,", "D,,E", "1:", "D:folder", ""})
+        assert(!ParseDriveList(input, selected));
+    const std::vector<std::wstring> bootEntries{L"third-party startup task", L"autocheck autochk /k:CE *",
+                                               L"autocheck autochk /p \\??\\D:", L"autocheck autochk /p \\??\\E:"};
+    std::vector<std::wstring> changed, restoredBoot;
+    assert(TransformBootExecute(bootEntries, {L'D'}, true, changed));
+    assert(changed == std::vector<std::wstring>({L"third-party startup task", L"autocheck autochk /k:CED *",
+                                               L"autocheck autochk /p \\??\\E:"}));
+    assert(TransformBootExecute(changed, {L'D'}, false, restoredBoot));
+    assert(restoredBoot == std::vector<std::wstring>({L"third-party startup task", L"autocheck autochk /k:CE *",
+                                                    L"autocheck autochk /p \\??\\E:"}));
+    assert(!TransformBootExecute({L"third-party startup task"}, {L'D'}, true, changed));
+    assert(!TransformBootExecute(bootEntries, {L'1'}, true, changed));
+    assert(!TransformBootExecute({}, {L'D'}, true, changed));
+    assert(TransformBootExecute({}, {L'D'}, true, changed, {}, true));
+    assert(changed == std::vector<std::wstring>({L"autocheck autochk /k:D *"}));
+    assert(TransformBootExecute({L"autocheck autochk *", L"autocheck autochk /p \\??\\Volume{2eca078d-5cbc-43d3-aff8-7e8511f60d0e}"},
+                               {L'D'}, true, changed, {L"\\\\?\\Volume{2eca078d-5cbc-43d3-aff8-7e8511f60d0e}\\"}));
+    assert(changed == std::vector<std::wstring>({L"autocheck autochk /k:D *"}));
+    assert(IsVolumeGuidPath(L"\\\\?\\Volume{2eca078d-5cbc-43d3-aff8-7e8511f60d0e}\\"));
+    assert(!IsVolumeGuidPath(L"C:\\"));
+    assert(NormalizeMountPoint("x:") == L"X:\\");
+    assert(NormalizeMountPoint("relative-folder").empty());
     const std::string manifestHash(64, 'a');
     std::istringstream validManifest(manifestHash + "  system-toolbox.exe\r\n");
     assert(ReadToolboxManifestHash(validManifest) == std::string(64, 'A'));
@@ -184,12 +210,18 @@ int main()
     assert(std::filesystem::create_directory(root));
     auto source = root / std::filesystem::u8path("中文 O'Brien & input.bin");
     WriteFile(source, "abc");
-    assert(GetFileSHA256(source.u8string()) == "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD");
+    auto untrustedDlc = root / "untrusted.exe";
+    auto installedDlc = root / "disktool.exe";
+    WriteFile(untrustedDlc, "not a disktool executable");
+    WriteFile(installedDlc, "preserved DLC");
+    assert(!InstallDisktoolFile(untrustedDlc, installedDlc));
+    assert(ReadFile(installedDlc) == "preserved DLC");
+    assert(GetFileSHA256(PathToUtf8(source)) == "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD");
     WriteFile(source, "");
-    assert(GetFileSHA256(source.u8string()) == "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855");
+    assert(GetFileSHA256(PathToUtf8(source)) == "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855");
     WriteFile(source, std::string(1000000, 'a'));
-    assert(GetFileSHA256(source.u8string()) == "CDC76E5C9914FB9281A1C7E284D73E67F1809A48A497200E046D39CCC7112CD0");
-    assert(GetFileSHA256((root / "missing").u8string()).empty());
+    assert(GetFileSHA256(PathToUtf8(source)) == "CDC76E5C9914FB9281A1C7E284D73E67F1809A48A497200E046D39CCC7112CD0");
+    assert(GetFileSHA256(PathToUtf8(root / "missing")).empty());
     assert(GetLocalExeHash().size() == 64);
     assert(GetBuildIdentity() == "SHA256 " + GetLocalExeHash().substr(0, 12));
     auto archive = root / "中文 O'Brien & release.zip";
@@ -198,7 +230,7 @@ int main()
     assert(RunPowerShellFile("param([string]$Source,[string]$Zip)\n$ErrorActionPreference='Stop'\n"
                             "Compress-Archive -LiteralPath $Source -DestinationPath $Zip -Force\n",
                             {archivedExe.wstring(), archive.wstring()}));
-    assert(GetRemoteExeHash(archive.u8string()) == GetFileSHA256(archivedExe.u8string()));
+    assert(GetRemoteExeHash(PathToUtf8(archive)) == GetFileSHA256(PathToUtf8(archivedExe)));
     auto installDirectory = root / "install";
     assert(std::filesystem::create_directory(installDirectory));
     auto installedExe = installDirectory / "system-toolbox.exe";
@@ -240,30 +272,30 @@ int main()
     WriteFile(source, bytes);
     for (int base : {2, 8, 10, 16, 32, 36, 64})
     {
-        assert(ConvertFileBase(source.u8string(), encoded.u8string(), base, false));
-        assert(ConvertFileBase(encoded.u8string(), restored.u8string(), base, true));
+        assert(ConvertFileBase(PathToUtf8(source), PathToUtf8(encoded), base, false));
+        assert(ConvertFileBase(PathToUtf8(encoded), PathToUtf8(restored), base, true));
         assert(ReadFile(restored) == bytes);
     }
-    assert(!ConvertFileBase(source.u8string(), source.u8string(), 16, false));
+    assert(!ConvertFileBase(PathToUtf8(source), PathToUtf8(source), 16, false));
     assert(ReadFile(source) == bytes);
     WriteFile(restored, "preserved");
     for (const std::string invalid : {"256", "-1", "12abc", "2进制:"})
     {
         WriteFile(encoded, invalid);
-        assert(!ConvertFileBase(encoded.u8string(), restored.u8string(), 10, true));
+        assert(!ConvertFileBase(PathToUtf8(encoded), PathToUtf8(restored), 10, true));
         assert(ReadFile(restored) == "preserved");
     }
     WriteFile(encoded, "@@@@");
-    assert(!ConvertFileBase(encoded.u8string(), restored.u8string(), 64, true));
+    assert(!ConvertFileBase(PathToUtf8(encoded), PathToUtf8(restored), 64, true));
     assert(ReadFile(restored) == "preserved");
     WriteFile(source, "abc");
-    assert(ConvertFileBase(source.u8string(), encoded.u8string(), 64, false));
+    assert(ConvertFileBase(PathToUtf8(source), PathToUtf8(encoded), 64, false));
     assert(ReadFile(encoded) == "YWJj");
     WriteFile(source, "");
     for (int base : {2, 16, 64})
     {
-        assert(ConvertFileBase(source.u8string(), encoded.u8string(), base, false));
-        assert(ConvertFileBase(encoded.u8string(), restored.u8string(), base, true));
+        assert(ConvertFileBase(PathToUtf8(source), PathToUtf8(encoded), base, false));
+        assert(ConvertFileBase(PathToUtf8(encoded), PathToUtf8(restored), base, true));
         assert(ReadFile(restored).empty());
     }
 

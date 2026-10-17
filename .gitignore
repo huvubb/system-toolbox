@@ -1,4 +1,5 @@
 /build/
+/build-cxx20/
 /last_version.txt
 __pycache__/
 .pytest_cache/
