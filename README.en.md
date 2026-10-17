@@ -115,6 +115,10 @@ Menu 29 (under Audio/Video tools) converts a single file or a whole directory to
 
 ## 💽 DiskTool add-on, mounting & disk check
 
+Menu **35** creates bootable media from a Windows Setup/WinPE ISO. It erases the selected physical disk, creates an active MBR/FAT32 partition of up to 30 GiB, copies setup and EFI boot files, and splits `sources/install.wim` when it exceeds FAT32's file limit. Optional BIOS support uses Microsoft-signed `bootsect.exe`. Target disks must be between 4 GiB and 2 TiB. Remaining disk space stays unallocated. This feature does not burn optical discs or write Linux ISOs.
+
+The tool refuses system, boot, page-file, ISO, application and temporary-script disks, displays disk identity and partitions, and requires an exact confirmation containing the disk's unique ID. It rechecks identity immediately before erasing and runs in the foreground after background tasks finish. Back up first: erasing cannot be rolled back. Actual boot compatibility depends on the ISO architecture and target firmware.
+
 Menu 33 installs the DiskTool add-on from a user-provided URL or a local build, verifying its recorded SHA-256 both at install and at launch. Add-ons live in `%LOCALAPPDATA%\SystemToolbox\dlc`. Menu 34 lists volumes and mount points, mounts/unmounts ISO/VHD/VHDX, and mounts volumes to empty folders or free drive letters (images default to read-only). Menu 30 controls the automatic-boot-check setting for a selected volume only, preserving other volumes and third-party boot entries, and backs up the original configuration first.
 
 Runtime records and configuration backups are stored in `%LOCALAPPDATA%\SystemToolbox`.

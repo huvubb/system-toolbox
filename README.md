@@ -131,6 +131,10 @@ ctest --test-dir build --output-on-failure
 
 ### DiskTool DLC、挂载与磁盘检查
 
+主菜单 **35** 可将 Windows 安装/WinPE ISO 制作为磁盘启动介质：清除所选物理磁盘，创建最大 30GB 的 MBR/FAT32 活动分区，复制安装文件与 EFI 启动文件；超过 4GB 的 `sources/install.wim` 自动分卷。可选 UEFI+BIOS 模式会使用通过微软签名校验的 `bootsect.exe` 写入目标卷启动代码。需要管理员权限，目标盘容量须为 4GB–2TB；ISO 必须包含 Windows/WinPE 启动文件，本功能不支持 Linux ISO 或光盘刻录。大于 30GB 的剩余磁盘空间保持未分配。
+
+制作启动盘会清除目标盘所有分区和数据，不能自动回滚。程序显示编号、型号、序列号、容量与分区，并要求输入包含磁盘唯一标识的确认文本；拦截系统、启动、分页文件、ISO、工具箱和临时脚本所在盘，执行前再次校验磁盘身份。制作流程固定在前台，勿在写入期间拔盘或关闭程序；首次使用前请备份。完成后应安全弹出并通过固件启动菜单验证，UEFI/BIOS 是否可启动仍取决于镜像架构与目标固件。
+
 主菜单 33 可从用户提供的 [DiskTool 下载地址](https://q23213ddssd.dpdns.org/downloads/disktool.exe) 安装 DLC，也可导入 `D:\disktool\build\disktool.exe`。安装和启动时核验已记录构建的 SHA256；校验失败保留原 DLC。EXE 以子进程共享控制台运行，退出后返回主菜单。DLC 存放在 `%LOCALAPPDATA%\SystemToolbox\dlc`，无需放在主程序旁；涉及额外恢复工具或数据库的功能仍需 DiskTool 的配套资源。
 
 主菜单 34 支持列出卷和挂载点、挂载/卸载 ISO/VHD/VHDX、将卷挂载到空目录或空闲盘符、移除单个挂载点。镜像默认只读，VHD/VHDX 可选择读写；不允许移除系统卷或工具箱所在卷的根挂载点。

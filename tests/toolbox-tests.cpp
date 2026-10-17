@@ -209,6 +209,37 @@ int main()
     auto root = std::filesystem::current_path() / ("testdata-" + std::to_string(GetCurrentProcessId()));
     assert(std::filesystem::create_directory(root));
     auto source = root / std::filesystem::u8path("中文 O'Brien & input.bin");
+    auto mediaScript = root / L"iso-boot-media.ps1";
+    WriteFile(mediaScript, std::string("\xEF\xBB\xBF") + GetIsoBootMediaScript());
+    assert(RunPowerShellFile(R"PS(param([string]$Source)
+$ErrorActionPreference='Stop'
+$tokens=$null; $errors=$null
+$null=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+if ($errors.Count) { throw ($errors | Out-String) }
+. $Source -FunctionsOnly
+$disk=[pscustomobject]@{Number=7;UniqueId='test-disk';Size=16GB;IsBoot=$false;IsSystem=$false;
+ IsOffline=$false;IsReadOnly=$false;IsClustered=$false;BusType='USB';HealthStatus='Healthy'}
+Assert-MediaDisk $disk @(0)
+function Must-Reject($Candidate,$Protected) {
+    $rejected=$false
+    try { Assert-MediaDisk $Candidate $Protected } catch { $rejected=$true }
+    if (-not $rejected) { throw 'Unsafe target accepted' }
+}
+Must-Reject $null @()
+Must-Reject $disk @(7)
+foreach($flag in @('IsBoot','IsSystem','IsOffline','IsReadOnly','IsClustered')) {
+    $disk.$flag=$true; Must-Reject $disk @(); $disk.$flag=$false
+}
+foreach($bus in @('Spaces','Virtual','File Backed Virtual')) {
+    $disk.BusType=$bus; Must-Reject $disk @()
+}
+$disk.BusType='USB'
+$disk.UniqueId=''; Must-Reject $disk @(); $disk.UniqueId='test-disk'
+$disk.Size=1GB; Must-Reject $disk @(); $disk.Size=16GB
+$disk.Size=3TB; Must-Reject $disk @(); $disk.Size=16GB
+$disk.HealthStatus='Warning'; Must-Reject $disk @()
+Write-Host 'ISO media script parses; protected and ambiguous disks rejected without disk writes.'
+)PS", {mediaScript.wstring()}));
     WriteFile(source, "abc");
     auto untrustedDlc = root / "untrusted.exe";
     auto installedDlc = root / "disktool.exe";

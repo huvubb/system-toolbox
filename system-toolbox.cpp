@@ -595,6 +595,7 @@ bool DownloadWithFastdl(const std::string& url, const std::string& destination, 
 void FastdlMenu();
 void DisktoolDlcMenu();
 void VolumeMountMenu();
+void CreateIsoBootMedia();
 std::string GetFileSHA256(const std::string& filePath);
 std::string GetLocalExeHash();
 std::string GetRemoteExeHash(const std::string& zipPath);
@@ -924,6 +925,7 @@ int main()
         std::cout << "32. fastdl 高速下载器\n";
         std::cout << "33. DiskTool DLC\n";
         std::cout << "34. 卷与镜像挂载管理\n";
+        std::cout << "35. ISO 写入磁盘并制作启动盘\n";
         std::cout << "90. 切换在线/离线模式\n";
         std::cout << " 0. 退出程序\n";
         std::cout << "========================================\n";
@@ -983,6 +985,7 @@ int main()
             case 32: FastdlMenu(); break;
             case 33: DisktoolDlcMenu(); break;
             case 34: VolumeMountMenu(); break;
+            case 35: CreateIsoBootMedia(); break;
 
             case 90:  // 切换模式
                 ToggleMode();
@@ -7661,7 +7664,7 @@ void FastdlMenu()
     Pause();
 }
 
-bool RunPowerShellFile(const std::string& script, const std::vector<std::wstring>& parameters)
+bool RunPowerShellFile(const std::string& script, const std::vector<std::wstring>& parameters, bool interactive = false)
 {
     wchar_t directory[MAX_PATH], file[MAX_PATH];
     DWORD length = GetTempPathW(MAX_PATH, directory);
@@ -7672,7 +7675,9 @@ bool RunPowerShellFile(const std::string& script, const std::vector<std::wstring
     output << "\xEF\xBB\xBF" << script;
     output.close();
     if (!output) { DeleteFileW(scriptPath.c_str()); return false; }
-    std::vector<std::wstring> arguments{L"powershell.exe", L"-NoProfile", L"-NonInteractive", L"-ExecutionPolicy", L"Bypass", L"-File", scriptPath.wstring()};
+    std::vector<std::wstring> arguments{L"powershell.exe", L"-NoProfile"};
+    if (!interactive) arguments.push_back(L"-NonInteractive");
+    arguments.insert(arguments.end(), {L"-ExecutionPolicy", L"Bypass", L"-File", scriptPath.wstring()});
     arguments.insert(arguments.end(), parameters.begin(), parameters.end());
     bool result = RunProcessArguments(arguments);
     DeleteFileW(scriptPath.c_str());
@@ -11467,6 +11472,165 @@ bool IsProtectedMountPoint(const std::wstring& mount)
     if (!GetModuleFileNameW(nullptr, exe.data(), static_cast<DWORD>(exe.size())) ||
         !GetVolumePathNameW(exe.data(), volume.data(), static_cast<DWORD>(volume.size()))) return true;
     return !_wcsicmp(volume.data(), mount.c_str());
+}
+
+std::string GetIsoBootMediaScript()
+{
+    return R"PS(param([string]$Image,[string]$ToolPath,[switch]$FunctionsOnly)
+$ErrorActionPreference='Stop'
+function Assert-MediaDisk($Disk,$ProtectedNumbers) {
+    if ($null -eq $Disk -or $Disk.IsBoot -or $Disk.IsSystem -or $Disk.IsOffline -or
+        $Disk.IsReadOnly -or $Disk.IsClustered -or $Disk.BusType -in @('Spaces','File Backed Virtual','Virtual') -or
+        $Disk.HealthStatus -ne 'Healthy' -or $ProtectedNumbers -contains [int]$Disk.Number -or
+        [string]::IsNullOrWhiteSpace([string]$Disk.UniqueId) -or $Disk.Size -lt 4GB -or $Disk.Size -gt 2TB) {
+        throw '目标磁盘不可写、身份不明确、受保护或属于不支持的虚拟存储。'
+    }
+}
+function Get-ProtectedMediaDisks {
+    $numbers = @()
+    foreach ($path in @($env:SystemRoot,$env:SystemDrive,$ToolPath,$Image,$PSCommandPath)) {
+        if ([string]::IsNullOrWhiteSpace($path)) { throw '无法确定需要保护的路径。' }
+        $resolved = Get-Item -LiteralPath $path -Force
+        $volume = @(Get-Volume -FilePath $resolved.FullName)
+        if ($volume.Count -ne 1) { throw "无法确定路径所在的卷: $path" }
+        $partitions = @($volume[0] | Get-Partition)
+        if ($partitions.Count -ne 1) { throw "无法确定路径所在的物理磁盘: $path" }
+        $numbers += [int]$partitions[0].DiskNumber
+    }
+    foreach ($partition in @(Get-Partition)) {
+        if ($partition.IsBoot -or $partition.IsSystem) { $numbers += [int]$partition.DiskNumber }
+    }
+    foreach ($page in @(Get-CimInstance Win32_PageFileUsage)) {
+        $volume = @(Get-Volume -FilePath $page.Name)
+        if ($volume.Count -ne 1) { throw '无法定位分页文件，停止操作。' }
+        $numbers += [int](($volume[0] | Get-Partition).DiskNumber)
+    }
+    return @($numbers | Sort-Object -Unique)
+}
+if ($FunctionsOnly) { return }
+$mountedHere = $false
+$started = $false
+try {
+    if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)) { throw '请以管理员身份运行工具箱。' }
+    if ($Image.StartsWith('\\') -or $ToolPath.StartsWith('\\')) { throw '请使用本地磁盘上的镜像和工具箱。' }
+    $iso = Get-Item -LiteralPath $Image
+    if ($iso.Extension -ine '.iso' -or $iso.PSIsContainer -or ($iso.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw '请选择本地普通 ISO 文件。' }
+    $imageInfo = Get-DiskImage -ImagePath $iso.FullName
+    if (-not $imageInfo.Attached) {
+        $imageInfo = Mount-DiskImage -ImagePath $iso.FullName -Access ReadOnly -PassThru
+        $mountedHere = $true
+    }
+    $volumes = @($imageInfo | Get-Volume)
+    if ($volumes.Count -ne 1 -or -not $volumes[0].DriveLetter) { throw '无法读取 ISO 卷。' }
+    $source = "$($volumes[0].DriveLetter):\"
+    if (-not (Test-Path -LiteralPath ($source+'sources\boot.wim')) -or
+        -not (Test-Path -LiteralPath ($source+'boot\bcd')) -or
+        -not (Test-Path -LiteralPath ($source+'bootmgr'))) { throw '当前仅支持 Windows 安装/WinPE ISO。' }
+    $efi = @(Get-ChildItem -LiteralPath ($source+'efi\boot') -Filter 'boot*.efi' -File)
+    if ($efi.Count -eq 0) { throw '镜像缺少 UEFI 启动文件。' }
+    $files = @(Get-ChildItem -LiteralPath $source -File -Recurse -Force)
+    $large = @($files | Where-Object Length -gt 4294967295)
+    foreach ($file in $large) {
+        if ($file.FullName -ine ($source+'sources\install.wim')) { throw "FAT32 无法容纳此大文件: $($file.FullName)" }
+    }
+    $split = $large.Count -ne 0
+    if ($split -and (Test-Path -LiteralPath ($source+'sources\install.swm'))) { throw '镜像同时包含 WIM 与 SWM，停止以免混合安装映像。' }
+    if ($split) { $null = Get-Command Split-WindowsImage -ErrorAction Stop }
+    $required = [uint64](($files | Measure-Object Length -Sum).Sum + 512MB)
+    if ($required -gt 30GB) { throw '镜像展开后超过本功能的 30GB 启动分区上限。' }
+    $protected = @(Get-ProtectedMediaDisks)
+    Get-Disk | Select-Object Number,FriendlyName,SerialNumber,BusType,@{n='GiB';e={[math]::Round($_.Size/1GB,2)}},IsBoot,IsSystem | Format-Table -AutoSize | Out-Host
+    $inputNumber = Read-Host '目标物理磁盘编号（留空取消；整盘所有分区和数据将被清除）'
+    if ($inputNumber -eq '') { return }
+    if ($inputNumber -notmatch '^\d{1,5}$') { throw '磁盘编号无效。' }
+    $disk = Get-Disk -Number ([int]$inputNumber)
+    Assert-MediaDisk $disk $protected
+    $identity = [string]$disk.UniqueId
+    $diskSize = [uint64]$disk.Size
+    if ($diskSize -lt ($required+2MB)) { throw '磁盘空间不足。' }
+    $mode = Read-Host '启动模式：1=UEFI（默认），2=UEFI+传统 BIOS'
+    if ($mode -notin @('','1','2')) { throw '启动模式无效。' }
+    $legacy = $mode -eq '2'
+    $bootsect = Join-Path $env:SystemRoot 'System32\bootsect.exe'
+    if ($legacy) {
+        if (-not (Test-Path -LiteralPath $bootsect)) { $bootsect = $source+'boot\bootsect.exe' }
+        $signature = Get-AuthenticodeSignature -LiteralPath $bootsect
+        if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft') {
+            throw 'BIOS 模式需要已通过微软数字签名校验的 bootsect.exe。'
+        }
+    }
+    $disk | Format-List Number,FriendlyName,SerialNumber,UniqueId,Size,BusType | Out-Host
+    Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | Select-Object PartitionNumber,DriveLetter,Size,Type | Format-Table | Out-Host
+    Write-Host '警告：将清除以上物理磁盘的全部分区和数据，创建最大 30GB 的 MBR/FAT32 启动分区；剩余空间保持未分配。' -ForegroundColor Yellow
+    $confirmation = 'ERASE '+$disk.Number+' '+$identity
+    if ((Read-Host "确认请输入完整内容：$confirmation") -cne $confirmation) { Write-Host '已取消。'; return }
+    $fresh = Get-Disk -Number $disk.Number
+    Assert-MediaDisk $fresh @(Get-ProtectedMediaDisks)
+    if ([string]$fresh.UniqueId -cne $identity -or [uint64]$fresh.Size -ne $diskSize) { throw '磁盘身份已变化，停止写入。' }
+    # shortcut: 留在前台执行，避免暂停/退出后台队列使分区或写入半途终止。
+    $started = $true
+    if ($fresh.PartitionStyle -ne 'RAW') {
+        Clear-Disk -InputObject $fresh -RemoveData -RemoveOEM -Confirm:$false
+    }
+    $fresh = Initialize-Disk -InputObject $fresh -PartitionStyle MBR -PassThru
+    $partitionSize = [uint64][math]::Min(30GB,([math]::Floor(($diskSize-2MB)/1MB)*1MB))
+    $partition = New-Partition -InputObject $fresh -Size $partitionSize -AssignDriveLetter -IsActive
+    $volume = $partition | Format-Volume -FileSystem FAT32 -NewFileSystemLabel 'WINSETUP' -Force -Confirm:$false
+    if (-not $volume.DriveLetter) { throw '新分区没有可用盘符。' }
+    $target = "$($volume.DriveLetter):\"
+    if ([uint64]$volume.SizeRemaining -lt $required) { throw '格式化后的可用空间不足。' }
+    $copyArgs = @($source,$target,'/E','/COPY:DAT','/DCOPY:T','/R:1','/W:1','/XJ','/NP')
+    if ($split) { $copyArgs += @('/XF',($source+'sources\install.wim')) }
+    & "$env:SystemRoot\System32\robocopy.exe" @copyArgs
+    if ($LASTEXITCODE -ge 8) { throw "复制文件失败: $LASTEXITCODE" }
+    if ($split) {
+        Split-WindowsImage -ImagePath ($source+'sources\install.wim') -SplitImagePath ($target+'sources\install.swm') -FileSize 3800 -CheckIntegrity | Out-Host
+    }
+    if ($legacy) {
+        & $bootsect /nt60 "$($volume.DriveLetter):" /mbr
+        if ($LASTEXITCODE -ne 0) { throw "写入 BIOS 启动代码失败: $LASTEXITCODE" }
+    }
+    foreach ($file in $files) {
+        if ($split -and $file.FullName -ieq ($source+'sources\install.wim')) { continue }
+        $written = Get-Item -LiteralPath (Join-Path $target $file.FullName.Substring($source.Length))
+        if ($written.Length -ne $file.Length) { throw "复制后的文件大小不符: $($file.FullName)" }
+    }
+    if ($split -and @(Get-ChildItem -LiteralPath ($target+'sources') -Filter 'install*.swm' -File).Count -eq 0) { throw '缺少分卷安装文件。' }
+    Write-Host "制作完成：$target；启动文件已写入，请安全弹出后从固件启动菜单选择此磁盘。" -ForegroundColor Green
+} catch {
+    Write-Host $_ -ForegroundColor Red
+    if ($started) { Write-Host '目标盘可能处于部分完成状态，请重新制作；数据清除不能自动回滚。' }
+    exit 1
+} finally {
+    if ($mountedHere) { Dismount-DiskImage -ImagePath $Image -ErrorAction Continue | Out-Null }
+}
+)PS";
+}
+
+void CreateIsoBootMedia()
+{
+    {
+        auto& queue = GetTaskQueue();
+        std::lock_guard<std::mutex> lock(queue.mutex);
+        for (const auto& task : queue.tasks)
+            if (task->state == "running" || task->state == "waiting")
+            {
+                std::cout << "请先完成后台任务，避免制作启动盘时与磁盘读写冲突。\n";
+                return;
+            }
+    }
+    std::cout << "\n=== Windows ISO 启动盘制作 ===\n将清除指定物理磁盘；支持 UEFI 和可选传统 BIOS。仅在前台运行。\n";
+    std::string value = UnquotePath(GetInput("Windows 安装/WinPE ISO 完整路径（留空返回）: "));
+    if (value.empty()) return;
+    std::error_code error;
+    auto image = std::filesystem::absolute(std::filesystem::u8path(value), error);
+    if (error || !std::filesystem::is_regular_file(image, error)) { std::cout << "镜像文件不存在。\n"; Pause(); return; }
+    std::vector<wchar_t> program(32768);
+    DWORD size = GetModuleFileNameW(nullptr, program.data(), static_cast<DWORD>(program.size()));
+    if (!size || size >= program.size()) { std::cout << "无法确认工具箱所在路径。\n"; return; }
+    RunPowerShellFile(GetIsoBootMediaScript(), {image.wstring(), std::wstring(program.data())}, true);
+    Pause();
 }
 
 void VolumeMountMenu()
