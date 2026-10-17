@@ -76,7 +76,7 @@ Open-source Windows maintenance toolbox with background queues, resumable downlo
 
 #### MinGW-w64 编译命令
 ```bash
-g++ -o system-toolbox.exe system-toolbox.cpp -std=c++17 -O2 -fexec-charset=UTF-8 -finput-charset=UTF-8 -lws2_32 -lshell32 -ladvance32 -lole32 -lcrypt32 -lopengl32 -ld3d11 -ldxgi -lgdi32 -luser32 -pthread -static
+g++ -o system-toolbox.exe system-toolbox.cpp -std=c++17 -O2 -fexec-charset=UTF-8 -finput-charset=UTF-8 -lws2_32 -lshell32 -ladvapi32 -lole32 -lcrypt32 -lopengl32 -ld3d11 -ldxgi -lgdi32 -luser32 -pthread -static
 ```
 
 在项目目录内运行，输出文件使用相对路径；部分 MinGW 链接器不支持包含中文的绝对输出路径。
