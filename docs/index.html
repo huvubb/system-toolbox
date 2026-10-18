@@ -11,6 +11,16 @@
 <link rel="canonical" href="https://huvubb.github.io/system-toolbox/">
 <style>
 body{margin:0;background:#10151e;color:#e8edf5;font:18px/1.7 system-ui,sans-serif}main{max-width:950px;margin:auto;padding:72px 24px}h1{font-size:clamp(36px,7vw,64px);line-height:1.15;margin:16px 0}h2{font-size:24px}p{color:#bfcbdc}a{color:#9ed5ff}a:focus-visible{outline:3px solid #fff;outline-offset:5px}.tag{color:#84e2ba}.button{display:inline-block;background:#9ed5ff;color:#10151e;padding:12px 22px;border-radius:10px;text-decoration:none;font-weight:700;margin:10px 16px 10px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:20px;margin:42px 0}article{background:#1a2432;padding:22px;border-radius:14px}article p{margin-bottom:0}footer{border-top:1px solid #344152;padding-top:24px;font-size:15px}
+.install{margin:28px 0 4px;background:#1a2432;border:1px solid #344152;border-radius:12px;overflow:hidden}
+.cmd{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #344152}
+.cmd:last-child{border-bottom:none}
+.b{font:700 13px/1 monospace;padding:3px 9px;border-radius:6px;flex-shrink:0}
+.b.w{background:#1f6feb;color:#fff}
+.b.n{background:#cb3837;color:#fff}
+.cmd code{flex:1;font:15px/1.4 monospace;color:#84e2ba;white-space:nowrap;overflow:auto}
+.cmd button{flex-shrink:0;background:#10151e;border:1px solid #344152;color:#bfcbdc;padding:5px 12px;border-radius:7px;cursor:pointer}
+.cmd button:hover{color:#9ed5ff;border-color:#9ed5ff}
+.note{font-size:14px;color:#8b96a5}
 </style>
 <main>
 <span class="tag">免费开源 · Windows 10 / 11 · v1.9</span>
@@ -18,6 +28,13 @@ body{margin:0;background:#10151e;color:#e8edf5;font:18px/1.7 system-ui,sans-seri
 <p>System Toolbox 将维护、安装、下载、音乐转换和磁盘管理集中在同一个控制台入口。后台队列让独立任务运行时，你还能继续操作。</p>
 <a class="button" href="https://github.com/huvubb/system-toolbox/releases/download/v1.9/system-toolbox-windows.zip">下载 v1.9 完整包</a>
 <a href="https://github.com/huvubb/system-toolbox">查看源码与使用说明 ↗</a>
+
+<div class="install">
+  <div class="cmd"><span class="b w">winget</span><code>winget install system-toolbox</code><button onclick="copyCmd(this)">复制</button></div>
+  <div class="cmd"><span class="b n">npm</span><code>npm install -g system-toolbox</code><button onclick="copyCmd(this)">复制</button></div>
+</div>
+<p class="note">winget / npm 官方收录审核中，通过后即可一键安装；在此之前请直接下载 ZIP 解压使用。</p>
+
 <div class="grid">
 <article><h2>安装不用一直等</h2><p>winget 等独立命令可加入后台队列；支持并发、优先级、暂停、继续和独立日志。安装后刷新常用开发工具的 PATH。</p></article>
 <article><h2>下载与音频处理</h2><p>集成 fastdl 多线程和断点下载；支持 NCM、QMC、KGM、KWM 等常见音乐文件转 MP3，转码需要 FFmpeg。</p></article>
@@ -28,5 +45,8 @@ body{margin:0;background:#10151e;color:#e8edf5;font:18px/1.7 system-ui,sans-seri
 <p>部分音乐文件需要对应密钥，新版厂商格式可能不兼容。磁盘写入和修复前请备份重要数据。DiskTool 的部分功能需要配套资源。</p>
 <p><a href="https://github.com/huvubb/system-toolbox/releases/tag/v1.9">完整发行说明与校验清单</a> · <a href="https://github.com/huvubb/system-toolbox/issues">反馈问题或建议</a></p>
 <footer>Open-source Windows maintenance toolbox · C++17/20 · <a href="https://github.com/huvubb/system-toolbox/blob/main/LICENSE">MIT License</a><br>如果它帮到了你，欢迎分享项目链接、提交使用反馈或参与贡献。</footer>
+<script>
+function copyCmd(b){var c=b.parentElement.querySelector('code').innerText.trim();function d(){b.textContent='已复制';setTimeout(function(){b.textContent='复制';},1500)}if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(c).then(d)}else{var t=document.createElement('textarea');t.value=c;document.body.appendChild(t);t.select();try{document.execCommand('copy')}catch(e){}t.remove();d()}}
+</script>
 </main>
 </html>
