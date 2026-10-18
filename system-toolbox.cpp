@@ -11400,7 +11400,8 @@ void DisktoolDlcMenu()
         {
             if (!g_bOnlineMode) { std::cout << "当前为离线模式。\n"; continue; }
             auto download = directory / L"disktool-download.exe";
-            if (!DownloadWithFastdl("https://q23213ddssd.dpdns.org/downloads/disktool.exe", PathToUtf8(download)))
+            if (!DownloadWithFastdl("https://github.com/huvubb/disktool/releases/download/v1.0.0/disktool.exe", PathToUtf8(download)) &&
+                !DownloadWithFastdl("https://q23213ddssd.dpdns.org/downloads/disktool.exe", PathToUtf8(download)))
                 std::cout << "下载未完成，已保留原 DLC。\n";
             else if (!InstallDisktoolFile(download, program))
                 std::cout << "DLC 校验或安装失败，已保留原 DLC。\n";
