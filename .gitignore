@@ -3,3 +3,6 @@
 /last_version.txt
 __pycache__/
 .pytest_cache/
+/npm-package/bin/
+/npm-package/*.tgz
+/npm-package/node_modules/

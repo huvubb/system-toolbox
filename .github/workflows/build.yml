@@ -40,6 +40,13 @@ jobs:
         run: cmake --build build --config Release --parallel 2
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+      - uses: actions/setup-node@v4
+        if: matrix.compiler == 'msvc'
+        with:
+          node-version: '20'
+      - name: Test npm launcher
+        if: matrix.compiler == 'msvc'
+        run: npm --prefix npm-package test
       - uses: actions/setup-python@v5
         if: matrix.compiler == 'msvc'
         with:

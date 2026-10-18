@@ -125,6 +125,10 @@ Runtime records and configuration backups are stored in `%LOCALAPPDATA%\SystemTo
 
 ---
 
+## Install with npm
+
+On Windows x64 with Node.js 18+, run `npm install system-toolbox`, then `npx system-toolbox`. For a global command, use `npm install -g system-toolbox`, then `system-toolbox`. Package 1.9.1 bundles all three native EXEs and requires no postinstall binary download. Administrator rights are requested when launching the toolbox.
+
 ## 🛡️ Safety
 
 - Disk writes and repairs can affect data — **back up important files first**.

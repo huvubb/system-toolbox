@@ -1,0 +1,23 @@
+{
+  "name": "system-toolbox",
+  "version": "1.9.1",
+  "description": "Open-source Windows maintenance toolbox with bundled native binaries, background queues, audio and disk tools.",
+  "bin": { "system-toolbox": "cli.js" },
+  "scripts": {
+    "prepack": "node verify-package.js",
+    "test": "node --test test/cli.test.cjs"
+  },
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "engines": { "node": ">=18" },
+  "files": ["cli.js", "verify-package.js", "bin/system-toolbox.exe", "bin/music-converter.exe", "bin/fastdl.exe",
+    "bin/README.md", "bin/SHA256SUMS.txt", "bin/MUSIC-CONVERTER-LICENSE.md", "bin/MUSIC-CONVERTER-NOTICE.md",
+    "bin/FASTDL-LICENSE.md", "bin/FASTDL-NOTICE.md"],
+  "keywords": ["windows", "toolbox", "maintenance", "winget", "audio-converter", "disk", "iso"],
+  "license": "MIT",
+  "author": "huvubb <810372789@qq.com>",
+  "repository": { "type": "git", "url": "git+https://github.com/huvubb/system-toolbox.git", "directory": "npm-package" },
+  "homepage": "https://github.com/huvubb/system-toolbox",
+  "bugs": { "url": "https://github.com/huvubb/system-toolbox/issues" },
+  "publishConfig": { "registry": "https://registry.npmjs.org/", "access": "public" }
+}

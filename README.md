@@ -70,7 +70,11 @@ Open-source Windows maintenance toolbox with background queues, resumable downlo
 
 > **注意**：运行需要管理员权限，部分功能（如 TrustedInstaller）需要同目录下放置 [PsExec64.exe](https://live.sysinternals.com/PsExec64.exe)
 
-### 方式二：从源码编译
+### 方式二：通过 npm 安装
+
+Windows x64、Node.js 18+：执行 `npm install system-toolbox`，然后用 `npx system-toolbox` 启动。需要全局命令时使用 `npm install -g system-toolbox`，之后可直接运行 `system-toolbox`。从 npm 包 1.9.1 起，三个 EXE 随包提供，安装时无需另从 GitHub 或镜像下载；系统维护在启动工具箱并确认管理员权限后执行。
+
+### 方式三：从源码编译
 
 #### 编译环境
 - Visual Studio 2019/2022 或 MinGW-w64
