@@ -21,6 +21,7 @@ body{margin:0;background:#10151e;color:#e8edf5;font:18px/1.7 system-ui,sans-seri
 .cmd button{flex-shrink:0;background:#10151e;border:1px solid #344152;color:#bfcbdc;padding:5px 12px;border-radius:7px;cursor:pointer}
 .cmd button:hover{color:#9ed5ff;border-color:#9ed5ff}
 .note{font-size:14px;color:#8b96a5}
+.note code{color:#84e2ba}
 </style>
 <main>
 <span class="tag">免费开源 · Windows 10 / 11 · v1.9</span>
@@ -33,7 +34,7 @@ body{margin:0;background:#10151e;color:#e8edf5;font:18px/1.7 system-ui,sans-seri
   <div class="cmd"><span class="b w">winget</span><code>winget install system-toolbox</code><button onclick="copyCmd(this)">复制</button></div>
   <div class="cmd"><span class="b n">npm</span><code>npm install -g system-toolbox</code><button onclick="copyCmd(this)">复制</button></div>
 </div>
-<p class="note">winget / npm 官方收录审核中，通过后即可一键安装；在此之前请直接下载 ZIP 解压使用。</p>
+<p class="note">npm 已正式收录，可直接 <code>npm install -g system-toolbox</code> 安装；winget 官方收录审核中，通过前可先下载 ZIP 解压使用。</p>
 
 <div class="grid">
 <article><h2>安装不用一直等</h2><p>winget 等独立命令可加入后台队列；支持并发、优先级、暂停、继续和独立日志。安装后刷新常用开发工具的 PATH。</p></article>
