@@ -12,6 +12,16 @@ find_package(Threads REQUIRED)
 include(CTest)
 
 add_executable(system-toolbox system-toolbox.cpp)
+set(MUSIC_CONVERTER_BINARY "" CACHE FILEPATH "Prebuilt music converter to embed")
+if(MUSIC_CONVERTER_BINARY)
+    file(SHA256 "${MUSIC_CONVERTER_BINARY}" music_hash)
+    string(TOUPPER "${music_hash}" music_hash)
+    target_compile_definitions(system-toolbox PRIVATE MUSIC_CONVERTER_SHA256="${music_hash}")
+    enable_language(RC)
+    file(TO_CMAKE_PATH "${MUSIC_CONVERTER_BINARY}" music_resource_path)
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/music.rc" "301 RCDATA \"${music_resource_path}\"\n")
+    target_sources(system-toolbox PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/music.rc")
+endif()
 add_custom_command(TARGET system-toolbox POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_SOURCE_DIR}/fastdl-integration" "$<TARGET_FILE_DIR:system-toolbox>/fastdl-integration"

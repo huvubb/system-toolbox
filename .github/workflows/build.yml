@@ -82,7 +82,13 @@ jobs:
           $env:TOOLBOX_TEST_EXECUTABLE = (Resolve-Path build/Release/toolbox-tests.exe).Path
           python -m pytest fastdl-integration/tests -q
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $names = @('system-toolbox.exe','music-converter.exe','fastdl.exe','README.md','MUSIC-CONVERTER-LICENSE.md','MUSIC-CONVERTER-NOTICE.md','FASTDL-LICENSE.md','FASTDL-NOTICE.md')
+          Copy-Item system-toolbox.cpp build/Release/system-toolbox.cpp
+          Copy-Item CHANGELOG.md build/Release/CHANGELOG.md
+          cmake -S . -B build -DMUSIC_CONVERTER_BINARY="$((Resolve-Path build/Release/music-converter.exe).Path)"
+          cmake --build build --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Content music-converter/UPSTREAM.md,music-converter/LICENSE | Add-Content build/Release/README.md
+          $names = @('system-toolbox.cpp','system-toolbox.exe','README.md','CHANGELOG.md')
           $hashes = $names | ForEach-Object { $hash = Get-FileHash -LiteralPath "build/Release/$_" -Algorithm SHA256; "$($hash.Hash)  $_" }
           $hashes | Set-Content build/Release/SHA256SUMS.txt -Encoding ascii
           Compress-Archive -Path ($names | ForEach-Object { "build/Release/$_" }) -DestinationPath build/Release/system-toolbox-windows.zip -Force
@@ -91,13 +97,5 @@ jobs:
         with:
           name: system-toolbox-windows
           path: |
-            build/Release/system-toolbox.exe
-            build/Release/README.md
-            build/Release/music-converter.exe
-            build/Release/MUSIC-CONVERTER-LICENSE.md
-            build/Release/MUSIC-CONVERTER-NOTICE.md
-            build/Release/fastdl.exe
-            build/Release/FASTDL-LICENSE.md
-            build/Release/FASTDL-NOTICE.md
-            build/Release/SHA256SUMS.txt
             build/Release/system-toolbox-windows.zip
+            build/Release/SHA256SUMS.txt

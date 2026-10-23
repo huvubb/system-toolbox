@@ -2,8 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const names = ['system-toolbox.exe', 'music-converter.exe', 'fastdl.exe', 'README.md',
-  'MUSIC-CONVERTER-LICENSE.md', 'MUSIC-CONVERTER-NOTICE.md', 'FASTDL-LICENSE.md', 'FASTDL-NOTICE.md'];
+const names = ['system-toolbox.exe', 'README.md'];
 const directory = path.join(__dirname, 'bin');
 const lines = fs.readFileSync(path.join(directory, 'SHA256SUMS.txt'), 'utf8').trim().split(/\r?\n/);
 if (lines.length !== names.length) throw new Error('Unexpected native manifest file count');

@@ -146,3 +146,37 @@ ctest --test-dir build --output-on-failure
 主菜单 30 仅控制指定卷的开机自动检查：合并既有排除项，恢复时只移除所选卷的排除项，保留其他卷及第三方启动项，并先保存原配置。不会终止全部 chkdsk 进程、清空 BootExecute、修改 WinRE 或全局 NTFS 自愈设置。旧版清空的启动检查配置可通过菜单 30 → 4 显式恢复 Windows 默认入口，同时仅排除所选卷；原值无法推断，非空的未知配置会拒绝覆盖。
 
 运行记录和配置备份存放在 `%LOCALAPPDATA%\SystemToolbox`。安装目录仅需 EXE、主 CPP 和 Markdown 文档；许可证文件使用 `.md` 扩展名。
+
+
+## 音乐转换器第三方声明与许可证
+
+This directory contains the local decoder from
+[music-geshizhuanhuan](https://github.com/HRuiCcc/music-geshizhuanhuan),
+revision `28f4ed0724f85978405d961c0e955266eed383ee`, under the MIT license
+in `LICENSE`. The CLI reports empty input as an error, and directory scanning
+recognizes compound KGM/VPR extensions. VPR applies the additional mask from
+the [unlock-music implementation](https://git.edik.cn/github/unlock-music/compare/1.3.2..v1.6.0).
+The bundled KGM key is upstream's `assets/kugou_key.xz`.
+
+MIT License
+
+Copyright (c) 2026 music-geshizhuanhuan contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+

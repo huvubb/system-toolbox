@@ -14,7 +14,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
 }
 const binDir = path.join(__dirname, 'bin');
 const exe = path.join(binDir, 'system-toolbox.exe');
-for (const name of ['system-toolbox.exe', 'music-converter.exe', 'fastdl.exe']) {
+for (const name of ['system-toolbox.exe']) {
   if (!fs.existsSync(path.join(binDir, name))) {
     console.error(`[system-toolbox] Missing ${name}. Reinstall with: npm install system-toolbox@latest`);
     process.exit(1);

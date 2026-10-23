@@ -1806,9 +1806,9 @@ void OpenSoftwareWebsite()
             for (int i = 0; i < (int)softList.size(); i++)
             {
                 std::string name = softList[i].name;
-                std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+                std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                 std::string kw = searchKeyword;
-                std::transform(kw.begin(), kw.end(), kw.begin(), ::tolower);
+                std::transform(kw.begin(), kw.end(), kw.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                 if (name.find(kw) != std::string::npos)
                 {
                     filtered.push_back(i);
@@ -1862,11 +1862,13 @@ void OpenSoftwareWebsite()
         {
             try
             {
-                int num = std::stoi(input);
+                size_t parsed = 0;
+                int num = std::stoi(input, &parsed);
+                if (parsed != input.size()) continue;
                 if (num >= 1 && num <= (int)filtered.size())
                 {
                     int idx = filtered[num - 1];
-                    ShellExecuteA(NULL, "open", softList[idx].url, NULL, NULL, SW_SHOWNORMAL);
+                    if (reinterpret_cast<INT_PTR>(ShellExecuteA(NULL, "open", softList[idx].url, NULL, NULL, SW_SHOWNORMAL)) <= 32) { std::cout << "浏览器启动失败。\n"; Pause(); continue; }
                     std::cout << "已在默认浏览器中打开: " << softList[idx].name << std::endl;
                     Pause();
                 }
@@ -7612,15 +7614,9 @@ bool RunProcessArguments(const std::vector<std::wstring>& arguments, bool backgr
 
 std::vector<std::wstring> GetFastdlArguments()
 {
-    std::vector<wchar_t> module(32768);
-    DWORD length = GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
-    if (!length || length >= module.size()) return {};
-    auto directory = std::filesystem::path(module.data()).parent_path();
-    std::error_code error;
+    auto directory = GetToolboxDataDirectory() / L"dlc";
     auto binary = directory / L"fastdl.exe";
-    if (std::filesystem::is_regular_file(binary, error)) return {binary.wstring()};
-    auto script = directory / L"fastdl-integration" / L"dl.py";
-    if (std::filesystem::is_regular_file(script, error)) return {L"python.exe", L"-X", L"utf8", script.wstring()};
+    if (GetFileSHA256(PathToUtf8(binary)) == "DE894E0FD6C76C328EC0D099070C826CBE0202B9D701D8791C8EC4F5F42B2F55") return {binary.wstring()};
     return {};
 }
 
@@ -7634,8 +7630,10 @@ bool DownloadWithFastdl(const std::string& url, const std::string& destination, 
     auto arguments = GetFastdlArguments();
     if (arguments.empty())
     {
-        std::cout << "缺少 fastdl 组件，请使用完整工具箱安装包。\n";
-        return false;
+        auto staged = std::filesystem::u8path(destination + ".curl-part");
+        if (background) std::cout << "curl 下载需完成校验后替换目标，本次以前台执行。\n";
+        if (!RunProcessArguments({L"curl.exe", L"--fail", L"--location", L"--retry", L"2", L"--connect-timeout", L"20", L"--output", staged.wstring(), L"--url", Utf8Command(url)})) return false;
+        return MoveFileExW(staged.c_str(), std::filesystem::u8path(destination).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
     }
     std::error_code error;
     auto output = std::filesystem::absolute(std::filesystem::u8path(destination), error);
@@ -7646,7 +7644,7 @@ bool DownloadWithFastdl(const std::string& url, const std::string& destination, 
 
 void FastdlMenu()
 {
-    std::cout << "\n=== fastdl 高速下载器 ===\n1. 下载文件（支持后台队列）\n2. 打开完整下载器菜单（含 ed2k）\n";
+    std::cout << "\n=== fastdl 高速下载器 ===\n1. 下载文件（支持后台队列）\n2. 打开完整下载器菜单（含 ed2k）\n3. 从本地安装 FastDL DLC\n";
     int choice = GetIntInput("请选择: ");
     if (choice == 1)
     {
@@ -7655,6 +7653,15 @@ void FastdlMenu()
         if (output.size() >= 2 && output.front() == '"' && output.back() == '"') output = output.substr(1, output.size()-2);
         if (!url.empty() && !output.empty() && !DownloadWithFastdl(url, output, GetTaskQueue().enabled))
             std::cout << "下载失败，原目标文件保留，重试可续传。\n";
+    }
+    else if (choice == 3)
+    {
+        auto source = std::filesystem::u8path(GetInput("FastDL exe 路径（不加引号）: "));
+        auto directory = GetToolboxDataDirectory() / L"dlc";
+        std::error_code error;
+        std::filesystem::create_directories(directory, error);
+        if (!error && GetFileSHA256(PathToUtf8(source)) == "DE894E0FD6C76C328EC0D099070C826CBE0202B9D701D8791C8EC4F5F42B2F55" && CopyFileW(source.c_str(), (directory / L"fastdl.exe").c_str(), FALSE)) std::cout << "FastDL DLC 已安装。\n";
+        else std::cout << "安装失败或文件校验不通过。\n";
     }
     else if (choice == 2)
     {
@@ -8139,6 +8146,36 @@ std::string UnquotePath(std::string path)
     return path;
 }
 
+std::filesystem::path ExtractEmbeddedMusicConverter()
+{
+    auto resource = FindResourceW(nullptr, MAKEINTRESOURCEW(301), MAKEINTRESOURCEW(10));
+    if (!resource) return {};
+    auto loaded = LoadResource(nullptr, resource);
+    auto data = static_cast<const char*>(LockResource(loaded));
+    auto size = SizeofResource(nullptr, resource);
+    if (!data || !size) return {};
+    auto directory = GetToolboxDataDirectory();
+    if (directory.empty()) return {};
+    directory /= L"components";
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    if (error) return {};
+    auto helper = directory / L"music-converter.exe";
+#ifndef MUSIC_CONVERTER_SHA256
+#define MUSIC_CONVERTER_SHA256 "DCC925DBB6DE4413C561C3A04E370283DF039A3A7B2085439C87C29399F2AB34"
+#endif
+    const std::string hash = MUSIC_CONVERTER_SHA256;
+    if (GetFileSHA256(PathToUtf8(helper)) == hash) return helper;
+    auto staged = directory / (L"music-" + std::to_wstring(GetCurrentProcessId()) + L".tmp");
+    std::ofstream output(staged, std::ios::binary);
+    output.write(data, size);
+    output.close();
+    if (!output || GetFileSHA256(PathToUtf8(staged)) != hash ||
+        !MoveFileExW(staged.c_str(), helper.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    { DeleteFileW(staged.c_str()); return {}; }
+    return helper;
+}
+
 bool RunMusicConverter(const std::string& input, const std::string& output,
                        const std::string& ekey, const std::string& keyDatabase)
 {
@@ -8150,7 +8187,8 @@ bool RunMusicConverter(const std::string& input, const std::string& output,
         return false;
     }
     std::filesystem::path directory = std::filesystem::path(module.data()).parent_path();
-    std::filesystem::path helper = directory / L"music-converter.exe";
+    std::filesystem::path helper = ExtractEmbeddedMusicConverter();
+    if (helper.empty()) helper = directory / L"music-converter.exe";
     std::filesystem::path script = directory / L"music-converter" / L"unlocker.py";
     std::vector<std::wstring> args;
     std::error_code ec;
@@ -11419,6 +11457,7 @@ void DisktoolDlcMenu()
             if (!RunProcessArguments({program.wstring(), choice == 3 ? L"menu" : L"--help"}))
                 std::cout << "DiskTool 返回失败，请查看输出；本地动态构建可能需要 MinGW 运行库。\n";
             SetUtf8Console();
+            if (choice == 3) return;
         }
     }
 }
