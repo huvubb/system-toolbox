@@ -917,10 +917,9 @@ int main()
             std::cout << "27. 文档格式转换\n";
             std::cout << "28. 哈希工具\n";
             std::cout << "29. 进制转换工具\n";
-             std::cout << "30. 磁盘开机检查控制\n";
+            std::cout << "30. 磁盘开机检查控制\n";
         }
-
-        std::cout << "----------------------------------------\n";
+        
         std::cout << "31. 后台任务队列控制\n";
         std::cout << "32. fastdl 高速下载器\n";
         std::cout << "33. DiskTool DLC\n";
@@ -1806,9 +1805,9 @@ void OpenSoftwareWebsite()
             for (int i = 0; i < (int)softList.size(); i++)
             {
                 std::string name = softList[i].name;
-                std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                std::transform(name.begin(), name.end(), name.begin(), ::tolower);
                 std::string kw = searchKeyword;
-                std::transform(kw.begin(), kw.end(), kw.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                std::transform(kw.begin(), kw.end(), kw.begin(), ::tolower);
                 if (name.find(kw) != std::string::npos)
                 {
                     filtered.push_back(i);
@@ -1862,13 +1861,11 @@ void OpenSoftwareWebsite()
         {
             try
             {
-                size_t parsed = 0;
-                int num = std::stoi(input, &parsed);
-                if (parsed != input.size()) continue;
+                int num = std::stoi(input);
                 if (num >= 1 && num <= (int)filtered.size())
                 {
                     int idx = filtered[num - 1];
-                    if (reinterpret_cast<INT_PTR>(ShellExecuteA(NULL, "open", softList[idx].url, NULL, NULL, SW_SHOWNORMAL)) <= 32) { std::cout << "浏览器启动失败。\n"; Pause(); continue; }
+                    ShellExecuteA(NULL, "open", softList[idx].url, NULL, NULL, SW_SHOWNORMAL);
                     std::cout << "已在默认浏览器中打开: " << softList[idx].name << std::endl;
                     Pause();
                 }
@@ -7614,9 +7611,15 @@ bool RunProcessArguments(const std::vector<std::wstring>& arguments, bool backgr
 
 std::vector<std::wstring> GetFastdlArguments()
 {
-    auto directory = GetToolboxDataDirectory() / L"dlc";
+    std::vector<wchar_t> module(32768);
+    DWORD length = GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
+    if (!length || length >= module.size()) return {};
+    auto directory = std::filesystem::path(module.data()).parent_path();
+    std::error_code error;
     auto binary = directory / L"fastdl.exe";
-    if (GetFileSHA256(PathToUtf8(binary)) == "DE894E0FD6C76C328EC0D099070C826CBE0202B9D701D8791C8EC4F5F42B2F55") return {binary.wstring()};
+    if (std::filesystem::is_regular_file(binary, error)) return {binary.wstring()};
+    auto script = directory / L"fastdl-integration" / L"dl.py";
+    if (std::filesystem::is_regular_file(script, error)) return {L"python.exe", L"-X", L"utf8", script.wstring()};
     return {};
 }
 
@@ -7630,8 +7633,9 @@ bool DownloadWithFastdl(const std::string& url, const std::string& destination, 
     auto arguments = GetFastdlArguments();
     if (arguments.empty())
     {
+        if (destination.empty()) return false;
         auto staged = std::filesystem::u8path(destination + ".curl-part");
-        if (background) std::cout << "curl 下载需完成校验后替换目标，本次以前台执行。\n";
+        if (background) std::cout << "curl 回退以前台完成后替换目标文件。\n";
         if (!RunProcessArguments({L"curl.exe", L"--fail", L"--location", L"--retry", L"2", L"--connect-timeout", L"20", L"--output", staged.wstring(), L"--url", Utf8Command(url)})) return false;
         return MoveFileExW(staged.c_str(), std::filesystem::u8path(destination).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
     }
@@ -7644,7 +7648,7 @@ bool DownloadWithFastdl(const std::string& url, const std::string& destination, 
 
 void FastdlMenu()
 {
-    std::cout << "\n=== fastdl 高速下载器 ===\n1. 下载文件（支持后台队列）\n2. 打开完整下载器菜单（含 ed2k）\n3. 从本地安装 FastDL DLC\n";
+    std::cout << "\n=== fastdl 高速下载器 ===\n1. 下载文件（支持后台队列）\n2. 打开完整下载器菜单（含 ed2k）\n";
     int choice = GetIntInput("请选择: ");
     if (choice == 1)
     {
@@ -7653,15 +7657,6 @@ void FastdlMenu()
         if (output.size() >= 2 && output.front() == '"' && output.back() == '"') output = output.substr(1, output.size()-2);
         if (!url.empty() && !output.empty() && !DownloadWithFastdl(url, output, GetTaskQueue().enabled))
             std::cout << "下载失败，原目标文件保留，重试可续传。\n";
-    }
-    else if (choice == 3)
-    {
-        auto source = std::filesystem::u8path(GetInput("FastDL exe 路径（不加引号）: "));
-        auto directory = GetToolboxDataDirectory() / L"dlc";
-        std::error_code error;
-        std::filesystem::create_directories(directory, error);
-        if (!error && GetFileSHA256(PathToUtf8(source)) == "DE894E0FD6C76C328EC0D099070C826CBE0202B9D701D8791C8EC4F5F42B2F55" && CopyFileW(source.c_str(), (directory / L"fastdl.exe").c_str(), FALSE)) std::cout << "FastDL DLC 已安装。\n";
-        else std::cout << "安装失败或文件校验不通过。\n";
     }
     else if (choice == 2)
     {
@@ -8015,7 +8010,7 @@ void SoftwareUpdate()
             Pause(); return;
         }
     }
-    std::cout << "正在通过 fastdl 下载发布附件...\n";
+    std::cout << "正在下载发布附件（FastDL / curl）...\n";
     if (!DownloadWithFastdl(downloadUrl, zipPath))
     {
         std::cout << "下载未完成，已保留断点进度，请重试。\n";
@@ -8760,7 +8755,7 @@ void MediaToolsMenu()
         std::cout << "\n=== 音乐软件私有格式 ===\n";
         std::cout << "28. 网易云 NCM 转 MP3\n";
         std::cout << "29. 多平台音乐格式转 MP3（支持批量）\n";
-        std::cout << "\n=== 批量操作 ===\n";
+
         std::cout << "30. 批量格式转换\n";
         std::cout << "31. 批量提取音频\n";
         std::cout << "32. 批量视频压缩\n";
@@ -11457,7 +11452,6 @@ void DisktoolDlcMenu()
             if (!RunProcessArguments({program.wstring(), choice == 3 ? L"menu" : L"--help"}))
                 std::cout << "DiskTool 返回失败，请查看输出；本地动态构建可能需要 MinGW 运行库。\n";
             SetUtf8Console();
-            if (choice == 3) return;
         }
     }
 }
