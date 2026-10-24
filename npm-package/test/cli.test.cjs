@@ -7,7 +7,7 @@ const { spawnSync } = require('node:child_process');
 const cli = path.join(__dirname, '..', 'cli.js');
 
 test('help and version work without starting the maintenance application', () => {
-  for (const [flag, expected] of [['--version', '1.9.1'], ['--help', 'npx system-toolbox']]) {
+  for (const [flag, expected] of [['--version', require('../package.json').version], ['--help', 'npx system-toolbox']]) {
     const result = spawnSync(process.execPath, [cli, flag], { encoding: 'utf8' });
     assert.equal(result.status, 0);
     assert.ok(result.stdout.includes(expected));
