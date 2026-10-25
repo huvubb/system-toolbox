@@ -1,1 +1,100 @@
-bmFtZTogV2luZG93cyBidWlsZCBhbmQgcmVncmVzc2lvbiB0ZXN0cw0KDQpvbjoNCiAgcHVzaDoNCiAgcHVsbF9yZXF1ZXN0Og0KICB3b3JrZmxvd19kaXNwYXRjaDoNCg0KcGVybWlzc2lvbnM6DQogIGNvbnRlbnRzOiByZWFkDQoNCmpvYnM6DQogIHdpbmRvd3M6DQogICAgcnVucy1vbjogd2luZG93cy0yMDIyDQogICAgc3RyYXRlZ3k6DQogICAgICBmYWlsLWZhc3Q6IGZhbHNlDQogICAgICBtYXRyaXg6DQogICAgICAgIGNvbXBpbGVyOiBbbXN2YywgbWluZ3ddDQogICAgICAgIGluY2x1ZGU6DQogICAgICAgICAgLSBjb21waWxlcjogbXN2Yw0KICAgICAgICAgICAgc3RhbmRhcmQ6IDE3DQogICAgICAgICAgLSBjb21waWxlcjogbWluZ3cNCiAgICAgICAgICAgIHN0YW5kYXJkOiAyMA0KICAgIHN0ZXBzOg0KICAgICAgLSB1c2VzOiBhY3Rpb25zL2NoZWNrb3V0QHY0DQogICAgICAtIG5hbWU6IENvbmZpZ3VyZSBNU1ZDDQogICAgICAgIGlmOiBtYXRyaXguY29tcGlsZXIgPT0gJ21zdmMnDQogICAgICAgIHJ1bjogY21ha2UgLVMgLiAtQiBidWlsZCAtRyAiVmlzdWFsIFN0dWRpbyAxNyAyMDIyIiAtQSB4NjQgLURDTUFLRV9DWFhfU1RBTkRBUkQ9JHt7IG1hdHJpeC5zdGFuZGFyZCB9fQ0KICAgICAgLSB1c2VzOiBtc3lzMi9zZXR1cC1tc3lzMkB2Mg0KICAgICAgICBpZjogbWF0cml4LmNvbXBpbGVyID09ICdtaW5ndycNCiAgICAgICAgd2l0aDoNCiAgICAgICAgICBtc3lzdGVtOiBVQ1JUNjQNCiAgICAgICAgICBpbnN0YWxsOiBtaW5ndy13NjQtdWNydC14ODZfNjQtZ2NjIG1pbmd3LXc2NC11Y3J0LXg4Nl82NC1jbWFrZSBtaW5ndy13NjQtdWNydC14ODZfNjQtbmluamENCiAgICAgIC0gbmFtZTogQ29uZmlndXJlIE1pbkdXDQogICAgICAgIGlmOiBtYXRyaXguY29tcGlsZXIgPT0gJ21pbmd3Jw0KICAgICAgICBzaGVsbDogbXN5czIgezB9DQogICAgICAgIHJ1bjogfA0KICAgICAgICAgIGN5Z3BhdGggLXcgL3VjcnQ2NC9iaW4gPj4gIiRHSVRIVUJfUEFUSCINCiAgICAgICAgICBjbWFrZSAtUyAuIC1CIGJ1aWxkIC1HIE5pbmphIC1EQ01BS0VfQlVJTERfVFlQRT1SZWxlYXNlIC1EQ01BS0VfQ1hYX1NUQU5EQVJEPSR7eyBtYXRyaXguc3RhbmRhcmQgfX0gLURDTUFLRV9DWFhfQ09NUElMRVI9ZysrDQogICAgICAtIG5hbWU6IEJ1aWxkDQogICAgICAgIHJ1bjogY21ha2UgLS1idWlsZCBidWlsZCAtLWNvbmZpZyBSZWxlYXNlIC0tcGFyYWxsZWwgMg0KICAgICAgLSBuYW1lOiBUZXN0DQogICAgICAgIHJ1bjogY3Rlc3QgLS10ZXN0LWRpciBidWlsZCAtQyBSZWxlYXNlIC0tb3V0cHV0LW9uLWZhaWx1cmUNCiAgICAgIC0gdXNlczogYWN0aW9ucy9zZXR1cC1ub2RlQHY0DQogICAgICAgIGlmOiBtYXRyaXguY29tcGlsZXIgPT0gJ21zdmMnDQogICAgICAgIHdpdGg6DQogICAgICAgICAgbm9kZS12ZXJzaW9uOiAnMjAnDQogICAgICAtIG5hbWU6IFRlc3QgbnBtIGxhdW5jaGVyDQogICAgICAgIGlmOiBtYXRyaXguY29tcGlsZXIgPT0gJ21zdmMnDQogICAgICAgIHJ1bjogbnBtIC0tcHJlZml4IG5wbS1wYWNrYWdlIHRlc3QNCiAgICAgIC0gdXNlczogYWN0aW9ucy9zZXR1cC1weXRob25AdjUNCiAgICAgICAgaWY6IG1hdHJpeC5jb21waWxlciA9PSAnbXN2YycNCiAgICAgICAgd2l0aDoNCiAgICAgICAgICBweXRob24tdmVyc2lvbjogJzMuMTEnDQogICAgICAtIG5hbWU6IFRlc3QgYW5kIHBhY2thZ2UgbXVzaWMgY29udmVydGVyDQogICAgICAgIGlmOiBtYXRyaXguY29tcGlsZXIgPT0gJ21zdmMnDQogICAgICAgIHNoZWxsOiBwd3NoDQogICAgICAgIHJ1bjogfA0KICAgICAgICAgIHB5dGhvbiAtbSBwaXAgaW5zdGFsbCAtciBtdXNpYy1jb252ZXJ0ZXIvcmVxdWlyZW1lbnRzLnR4dCBweXRlc3Q9PTguNC4yIHB5aW5zdGFsbGVyPT02LjE2LjANCiAgICAgICAgICBweXRob24gLW0gcHl0ZXN0IG11c2ljLWNvbnZlcnRlci90ZXN0cw0KICAgICAgICAgIGlmICgkTEFTVEVYSVRDT0RFIC1uZSAwKSB7IGV4aXQgJExBU1RFWElUQ09ERSB9DQogICAgICAgICAgcHl0aG9uIC1tIFB5SW5zdGFsbGVyIC0tbm9jb25maXJtIC0tb25lZmlsZSAtLW5hbWUgbXVzaWMtY29udmVydGVyIC0tYWRkLWRhdGEgIm11c2ljLWNvbnZlcnRlci9hc3NldHM7YXNzZXRzIiAtLWRpc3RwYXRoIGJ1aWxkL1JlbGVhc2UgbXVzaWMtY29udmVydGVyL3VubG9ja2VyLnB5DQogICAgICAgICAgaWYgKCRMQVNURVhJVENPREUgLW5lIDApIHsgZXhpdCAkTEFTVEVYSVRDT0RFIH0NCiAgICAgICAgICBDb3B5LUl0ZW0gbXVzaWMtY29udmVydGVyL0xJQ0VOU0UgYnVpbGQvUmVsZWFzZS9NVVNJQy1DT05WRVJURVItTElDRU5TRS5tZA0KICAgICAgICAgIENvcHktSXRlbSBtdXNpYy1jb252ZXJ0ZXIvVVBTVFJFQU0ubWQgYnVpbGQvUmVsZWFzZS9NVVNJQy1DT05WRVJURVItTk9USUNFLm1kDQogICAgICAgICAgJGVudjpNVVNJQ19DT05WRVJURVJfRVhFQ1VUQUJMRSA9IChSZXNvbHZlLVBhdGggYnVpbGQvUmVsZWFzZS9tdXNpYy1jb252ZXJ0ZXIuZXhlKS5QYXRoDQogICAgICAgICAgJGVudjpUT09MQk9YX1RFU1RfRVhFQ1VUQUJMRSA9IChSZXNvbHZlLVBhdGggYnVpbGQvUmVsZWFzZS90b29sYm94LXRlc3RzLmV4ZSkuUGF0aA0KICAgICAgICAgIHB5dGhvbiAtbSBweXRlc3QgbXVzaWMtY29udmVydGVyL3Rlc3RzL3Rlc3RfY2xpLnB5DQogICAgICAgICAgaWYgKCRMQVNURVhJVENPREUgLW5lIDApIHsgZXhpdCAkTEFTVEVYSVRDT0RFIH0NCiAgICAgIC0gbmFtZTogVGVzdCBhbmQgcGFja2FnZSBmYXN0ZGwgYW5kIHVwZGF0ZSBoYXNoZXMNCiAgICAgICAgaWY6IG1hdHJpeC5jb21waWxlciA9PSAnbXN2YycNCiAgICAgICAgc2hlbGw6IHB3c2gNCiAgICAgICAgcnVuOiB8DQogICAgICAgICAgcHl0aG9uIC1tIHBpcCBpbnN0YWxsIC1yIGZhc3RkbC1pbnRlZ3JhdGlvbi9yZXF1aXJlbWVudHMudHh0DQogICAgICAgICAgcHl0aG9uIC1tIHB5dGVzdCBmYXN0ZGwtaW50ZWdyYXRpb24vdGVzdHMgLXENCiAgICAgICAgICBpZiAoJExBU1RFWElUQ09ERSAtbmUgMCkgeyBleGl0ICRMQVNURVhJVENPREUgfQ0KICAgICAgICAgIHB5dGhvbiAtbSBQeUluc3RhbGxlciAtLW5vY29uZmlybSAtLW9uZWZpbGUgLS1uYW1lIGZhc3RkbCAtLWFkZC1kYXRhICJmYXN0ZGwtaW50ZWdyYXRpb24vc2VydmVycy50eHQ7LiIgLS1kaXN0cGF0aCBidWlsZC9SZWxlYXNlIGZhc3RkbC1pbnRlZ3JhdGlvbi9kbC5weQ0KICAgICAgICAgIGlmICgkTEFTVEVYSVRDT0RFIC1uZSAwKSB7IGV4aXQgJExBU1RFWElUQ09ERSB9DQogICAgICAgICAgQ29weS1JdGVtIGZhc3RkbC1pbnRlZ3JhdGlvbi9MSUNFTlNFIGJ1aWxkL1JlbGVhc2UvRkFTVERMLUxJQ0VOU0UubWQNCiAgICAgICAgICBDb3B5LUl0ZW0gZmFzdGRsLWludGVncmF0aW9uL1VQU1RSRUFNLm1kIGJ1aWxkL1JlbGVhc2UvRkFTVERMLU5PVElDRS5tZA0KICAgICAgICAgIENvcHktSXRlbSBSRUFETUUubWQgYnVpbGQvUmVsZWFzZS9SRUFETUUubWQNCiAgICAgICAgICAkZW52OkZBU1RETF9FWEVDVVRBQkxFID0gKFJlc29sdmUtUGF0aCBidWlsZC9SZWxlYXNlL2Zhc3RkbC5leGUpLlBhdGgNCiAgICAgICAgICAkZW52OlRPT0xCT1hfVEVTVF9FWEVDVVRBQkxFID0gKFJlc29sdmUtUGF0aCBidWlsZC9SZWxlYXNlL3Rvb2xib3gtdGVzdHMuZXhlKS5QYXRoDQogICAgICAgICAgcHl0aG9uIC1tIHB5dGVzdCBmYXN0ZGwtaW50ZWdyYXRpb24vdGVzdHMgLXENCiAgICAgICAgICBpZiAoJExBU1RFWElUQ09ERSAtbmUgMCkgeyBleGl0ICRMQVNURVhJVENPREUgfQ0KICAgICAgICAgIENvcHktSXRlbSBzeXN0ZW0tdG9vbGJveC5jcHAgYnVpbGQvUmVsZWFzZS9zeXN0ZW0tdG9vbGJveC5jcHANCiAgICAgICAgICBjbWFrZSAtUyAuIC1CIGJ1aWxkIC1ETVVTSUNfQ09OVkVSVEVSX0JJTkFSWT0iJCgoUmVzb2x2ZS1QYXRoIGJ1aWxkL1JlbGVhc2UvbXVzaWMtY29udmVydGVyLmV4ZSkuUGF0aCkiDQogICAgICAgICAgY21ha2UgLS1idWlsZCBidWlsZCAtLWNvbmZpZyBSZWxlYXNlDQogICAgICAgICAgaWYgKCRMQVNURVhJVENPREUgLW5lIDApIHsgZXhpdCAkTEFTVEVYSVRDT0RFIH0NCiAgICAgICAgICBHZXQtQ29udGVudCBtdXNpYy1jb252ZXJ0ZXIvVVBTVFJFQU0ubWQsbXVzaWMtY29udmVydGVyL0xJQ0VOU0UgfCBBZGQtQ29udGVudCBidWlsZC9SZWxlYXNlL1JFQURNRS5tZA0KICAgICAgICAgICRuYW1lcyA9IEAoJ3N5c3RlbS10b29sYm94LmNwcCcsJ3N5c3RlbS10b29sYm94LmV4ZScsJ1JFQURNRS5tZCcpDQogICAgICAgICAgJGhhc2hlcyA9ICRuYW1lcyB8IEZvckVhY2gtT2JqZWN0IHsgJGhhc2ggPSBHZXQtRmlsZUhhc2ggLUxpdGVyYWxQYXRoICJidWlsZC9SZWxlYXNlLyRfIiAtQWxnb3JpdGhtIFNIQTI1NjsgIiQoJGhhc2guSGFzaCkgICRfIiB9DQogICAgICAgICAgJGhhc2hlcyB8IFNldC1Db250ZW50IGJ1aWxkL1JlbGVhc2UvU0hBMjU2U1VNUy50eHQgLUVuY29kaW5nIGFzY2lpDQogICAgICAgICAgQ29tcHJlc3MtQXJjaGl2ZSAtUGF0aCAoJG5hbWVzIHwgRm9yRWFjaC1PYmplY3QgeyAiYnVpbGQvUmVsZWFzZS8kXyIgfSkgLURlc3RpbmF0aW9uUGF0aCBidWlsZC9SZWxlYXNlL3N5c3RlbS10b29sYm94LXdpbmRvd3MuemlwIC1Gb3JjZQ0KICAgICAgLSB1c2VzOiBhY3Rpb25zL3VwbG9hZC1hcnRpZmFjdEB2NA0KICAgICAgICBpZjogbWF0cml4LmNvbXBpbGVyID09ICdtc3ZjJw0KICAgICAgICB3aXRoOg0KICAgICAgICAgIG5hbWU6IHN5c3RlbS10b29sYm94LXdpbmRvd3MNCiAgICAgICAgICBwYXRoOiB8DQogICAgICAgICAgICBidWlsZC9SZWxlYXNlL3N5c3RlbS10b29sYm94LXdpbmRvd3MuemlwDQogICAgICAgICAgICBidWlsZC9SZWxlYXNlL1NIQTI1NlNVTVMudHh0DQo=
+name: Windows build and regression tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [msvc, mingw]
+        include:
+          - compiler: msvc
+            standard: 17
+          - compiler: mingw
+            standard: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure MSVC
+        if: matrix.compiler == 'msvc'
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_CXX_STANDARD=${{ matrix.standard }}
+      - uses: msys2/setup-msys2@v2
+        if: matrix.compiler == 'mingw'
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
+      - name: Configure MinGW
+        if: matrix.compiler == 'mingw'
+        shell: msys2 {0}
+        run: |
+          cygpath -w /ucrt64/bin >> "$GITHUB_PATH"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=${{ matrix.standard }} -DCMAKE_CXX_COMPILER=g++
+      - name: Build
+        run: cmake --build build --config Release --parallel 2
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - uses: actions/setup-node@v4
+        if: matrix.compiler == 'msvc'
+        with:
+          node-version: '20'
+      - name: Test npm launcher
+        if: matrix.compiler == 'msvc'
+        run: npm --prefix npm-package test
+      - uses: actions/setup-python@v5
+        if: matrix.compiler == 'msvc'
+        with:
+          python-version: '3.11'
+      - name: Test and package music converter
+        if: matrix.compiler == 'msvc'
+        shell: pwsh
+        run: |
+          python -m pip install -r music-converter/requirements.txt pytest==8.4.2 pyinstaller==6.16.0
+          python -m pytest music-converter/tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m PyInstaller --noconfirm --onefile --name music-converter --add-data "music-converter/assets;assets" --distpath build/Release music-converter/unlocker.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item music-converter/LICENSE build/Release/MUSIC-CONVERTER-LICENSE.md
+          Copy-Item music-converter/UPSTREAM.md build/Release/MUSIC-CONVERTER-NOTICE.md
+          $env:MUSIC_CONVERTER_EXECUTABLE = (Resolve-Path build/Release/music-converter.exe).Path
+          $env:TOOLBOX_TEST_EXECUTABLE = (Resolve-Path build/Release/toolbox-tests.exe).Path
+          python -m pytest music-converter/tests/test_cli.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test and package fastdl and update hashes
+        if: matrix.compiler == 'msvc'
+        shell: pwsh
+        run: |
+          python -m pip install -r fastdl-integration/requirements.txt
+          python -m pytest fastdl-integration/tests -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m PyInstaller --noconfirm --onefile --name fastdl --add-data "fastdl-integration/servers.txt;." --distpath build/Release fastdl-integration/dl.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item fastdl-integration/LICENSE build/Release/FASTDL-LICENSE.md
+          Copy-Item fastdl-integration/UPSTREAM.md build/Release/FASTDL-NOTICE.md
+          Copy-Item README.md build/Release/README.md
+          $env:FASTDL_EXECUTABLE = (Resolve-Path build/Release/fastdl.exe).Path
+          $env:TOOLBOX_TEST_EXECUTABLE = (Resolve-Path build/Release/toolbox-tests.exe).Path
+          python -m pytest fastdl-integration/tests -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item system-toolbox.cpp build/Release/system-toolbox.cpp
+          cmake -S . -B build -DMUSIC_CONVERTER_BINARY="$((Resolve-Path build/Release/music-converter.exe).Path)"
+          cmake --build build --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Content music-converter/UPSTREAM.md,music-converter/LICENSE | Add-Content build/Release/README.md
+          $names = @('system-toolbox.cpp','system-toolbox.exe','README.md')
+          $hashes = $names | ForEach-Object { $hash = Get-FileHash -LiteralPath "build/Release/$_" -Algorithm SHA256; "$($hash.Hash)  $_" }
+          $hashes | Set-Content build/Release/SHA256SUMS.txt -Encoding ascii
+          Compress-Archive -Path ($names | ForEach-Object { "build/Release/$_" }) -DestinationPath build/Release/system-toolbox-windows.zip -Force
+      - uses: actions/upload-artifact@v4
+        if: matrix.compiler == 'msvc'
+        with:
+          name: system-toolbox-windows
+          path: |
+            build/Release/system-toolbox-windows.zip
+            build/Release/SHA256SUMS.txt

@@ -1,1 +1,19 @@
-J3VzZSBzdHJpY3QnOw0KY29uc3QgZnMgPSByZXF1aXJlKCdub2RlOmZzJyk7DQpjb25zdCBwYXRoID0gcmVxdWlyZSgnbm9kZTpwYXRoJyk7DQpjb25zdCBjcnlwdG8gPSByZXF1aXJlKCdub2RlOmNyeXB0bycpOw0KY29uc3QgbmFtZXMgPSBbJ3N5c3RlbS10b29sYm94LmV4ZScsICdSRUFETUUubWQnXTsNCmNvbnN0IGRpcmVjdG9yeSA9IHBhdGguam9pbihfX2Rpcm5hbWUsICdiaW4nKTsNCmNvbnN0IGxpbmVzID0gZnMucmVhZEZpbGVTeW5jKHBhdGguam9pbihkaXJlY3RvcnksICdTSEEyNTZTVU1TLnR4dCcpLCAndXRmOCcpLnRyaW0oKS5zcGxpdCgvXHI/XG4vKTsNCmlmIChsaW5lcy5sZW5ndGggIT09IG5hbWVzLmxlbmd0aCkgdGhyb3cgbmV3IEVycm9yKCdVbmV4cGVjdGVkIG5hdGl2ZSBtYW5pZmVzdCBmaWxlIGNvdW50Jyk7DQpjb25zdCBoYXNoZXMgPSBuZXcgTWFwKCk7DQpmb3IgKGNvbnN0IGxpbmUgb2YgbGluZXMpIHsNCiAgY29uc3QgbWF0Y2ggPSAvXihbYS1mMC05XXs2NH0pIHsyfShbXlxcL10rKSQvaS5leGVjKGxpbmUpOw0KICBpZiAoIW1hdGNoIHx8ICFuYW1lcy5pbmNsdWRlcyhtYXRjaFsyXSkgfHwgaGFzaGVzLmhhcyhtYXRjaFsyXSkpIHRocm93IG5ldyBFcnJvcignSW52YWxpZCBuYXRpdmUgbWFuaWZlc3QnKTsNCiAgaGFzaGVzLnNldChtYXRjaFsyXSwgbWF0Y2hbMV0udG9Mb3dlckNhc2UoKSk7DQp9DQpmb3IgKGNvbnN0IG5hbWUgb2YgbmFtZXMpIHsNCiAgY29uc3QgYWN0dWFsID0gY3J5cHRvLmNyZWF0ZUhhc2goJ3NoYTI1NicpLnVwZGF0ZShmcy5yZWFkRmlsZVN5bmMocGF0aC5qb2luKGRpcmVjdG9yeSwgbmFtZSkpKS5kaWdlc3QoJ2hleCcpOw0KICBpZiAoYWN0dWFsICE9PSBoYXNoZXMuZ2V0KG5hbWUpKSB0aHJvdyBuZXcgRXJyb3IoJ05hdGl2ZSBmaWxlIGhhc2ggbWlzbWF0Y2g6ICcgKyBuYW1lKTsNCn0NCmNvbnNvbGUubG9nKCdWZXJpZmllZCBhbGwgbmF0aXZlIGJpbmFyaWVzIGFuZCBsaWNlbnNlIGZpbGVzLicpOw0K
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const names = ['system-toolbox.exe', 'README.md'];
+const directory = path.join(__dirname, 'bin');
+const lines = fs.readFileSync(path.join(directory, 'SHA256SUMS.txt'), 'utf8').trim().split(/\r?\n/);
+if (lines.length !== names.length) throw new Error('Unexpected native manifest file count');
+const hashes = new Map();
+for (const line of lines) {
+  const match = /^([a-f0-9]{64}) {2}([^\\/]+)$/i.exec(line);
+  if (!match || !names.includes(match[2]) || hashes.has(match[2])) throw new Error('Invalid native manifest');
+  hashes.set(match[2], match[1].toLowerCase());
+}
+for (const name of names) {
+  const actual = crypto.createHash('sha256').update(fs.readFileSync(path.join(directory, name))).digest('hex');
+  if (actual !== hashes.get(name)) throw new Error('Native file hash mismatch: ' + name);
+}
+console.log('Verified all native binaries and license files.');
