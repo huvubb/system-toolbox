@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Privacy Policy - System Toolbox</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:780px;margin:40px auto;padding:0 20px;line-height:1.7;color:#24292e;}
+h1{border-bottom:1px solid #eaecef;padding-bottom:10px;}
+h2{margin-top:32px;}
+code{background:#f6f8fa;padding:2px 6px;border-radius:3px;font-size:0.9em;}
+</style>
+</head>
+<body>
+<h1>Privacy Policy</h1>
+<p><strong>System Toolbox</strong> is an open-source, offline Windows maintenance toolbox. This page explains what data the application stores and how it is handled.</p>
+
+<h2>What data is stored</h2>
+<p>System Toolbox stores the following data locally on your device, under <code>%LOCALAPPDATA%\SystemToolbox</code>:</p>
+<ul>
+<li><strong>Runtime logs</strong> — console session history and operation records</li>
+<li><strong>Background task queue state</strong> — pending/completed task entries and their output</li>
+<li><strong>Configuration backups</strong> — snapshots of settings before system-modifying operations</li>
+<li><strong>Optional add-on data</strong> — cached metadata for DiskTool DLC and volume mount state</li>
+</ul>
+
+<h2>What is NOT collected</h2>
+<ul>
+<li>No telemetry, analytics, or usage tracking</li>
+<li>No crash reports are transmitted</li>
+<li>No personal information is collected</li>
+<li>All downloads (updates, fastdl, etc.) go directly from the source you choose — no proxy, no intermediate server operated by the developer</li>
+</ul>
+
+<h2>Data transmission</h2>
+<p>System Toolbox does not send any data to the developer. The only network traffic the application generates is:</p>
+<ul>
+<li>Downloading updates from the official GitHub Releases page</li>
+<li>Running <code>winget</code> commands on your behalf (which contact Microsoft's package repositories)</li>
+<li>FastDL downloads from URLs you provide</li>
+</ul>
+
+<h2>Data retention and deletion</h2>
+<p>All data persists locally until you delete it. To fully remove all application data, simply delete the folder <code>%LOCALAPPDATA%\SystemToolbox</code>. Uninstalling the portable build requires no further cleanup — the executable is self-contained.</p>
+
+<h2>Contact</h2>
+<p>Questions? Open an issue at <a href="https://github.com/huvubb/system-toolbox/issues">https://github.com/huvubb/system-toolbox/issues</a>.</p>
+
+<hr>
+<p><small>Last updated: October 2026. This policy may be updated as the tool evolves; changes will be posted on this page.</small></p>
+</body>
+</html>
