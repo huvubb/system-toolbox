@@ -120,6 +120,11 @@ int main()
     assert(RunRepairOperation({L"powershell.exe", L"-NoProfile", L"-NonInteractive", L"-Command", L"exit 7"}) == 7);
     assert(!FindExecutableOnPath(L"cmd.exe").empty());
     assert(FindExecutableOnPath(L"toolbox-this-file-does-not-exist-9a4e.exe").empty());
+    {
+        std::vector<wchar_t> signedFile(32768);
+        DWORD length = GetEnvironmentVariableW(L"TOOLBOX_TEST_PSEXEC_FILE", signedFile.data(), static_cast<DWORD>(signedFile.size()));
+        if (length && length < signedFile.size()) assert(IsTrustedMicrosoftExecutable(std::filesystem::path(signedFile.data())));
+    }
     assert(DescribeCommandResult("cmd /d /c exit 0", 0).find("成功") != std::string::npos);
     for (const std::string command : {"winget install --id Example.App", "msiexec /i package.msi", "dism /online /restorehealth"})
         for (const int code : {3010, 1641})

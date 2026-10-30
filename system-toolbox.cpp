@@ -7768,7 +7768,11 @@ bool RunPowerShellFile(const std::string& script, const std::vector<std::wstring
     output << "\xEF\xBB\xBF" << script;
     output.close();
     if (!output) { DeleteFileW(scriptPath.c_str()); return false; }
-    std::vector<std::wstring> arguments{L"powershell.exe", L"-NoProfile"};
+    std::vector<wchar_t> systemDirectory(32768);
+    DWORD systemLength = GetSystemDirectoryW(systemDirectory.data(), static_cast<DWORD>(systemDirectory.size()));
+    if (!systemLength || systemLength >= systemDirectory.size()) { DeleteFileW(scriptPath.c_str()); return false; }
+    auto powershell = std::filesystem::path(systemDirectory.data()) / L"WindowsPowerShell" / L"v1.0" / L"powershell.exe";
+    std::vector<std::wstring> arguments{powershell.wstring(), L"-NoProfile"};
     if (!interactive) arguments.push_back(L"-NonInteractive");
     arguments.insert(arguments.end(), {L"-ExecutionPolicy", L"Bypass", L"-File", scriptPath.wstring()});
     arguments.insert(arguments.end(), parameters.begin(), parameters.end());
@@ -7791,6 +7795,7 @@ bool IsTrustedMicrosoftExecutable(const std::filesystem::path& file)
 {
     const std::string script = R"PS(param([string]$File)
 $ErrorActionPreference='Stop'
+Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
 $signature=Get-AuthenticodeSignature -LiteralPath $File
 if ($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate -or
     $signature.SignerCertificate.Subject -notmatch '(^|,\s*)CN=Microsoft Corporation(,|$)' -or
