@@ -6,11 +6,15 @@
 
 **System Toolbox** —— 免费开源的 Windows 10/11 系统维护工具箱，集成后台任务队列、高速下载、音乐转码和磁盘工具。
 
-[下载 v1.10.0 完整包](https://github.com/huvubb/system-toolbox/releases/download/v1.10.0/system-toolbox-windows.zip) · [更新说明与校验清单](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.0) · [项目介绍](https://huvubb.github.io/system-toolbox/)
+[下载 v1.10.1 ZIP](https://github.com/huvubb/system-toolbox/releases/download/v1.10.1/system-toolbox-windows.zip) · [下载独立 EXE](https://github.com/huvubb/system-toolbox/releases/download/v1.10.1/system-toolbox.exe) · [更新说明与校验清单](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.1) · [项目介绍](https://huvubb.github.io/system-toolbox/)
 
 > 🇨🇳 **国内直链（免代理、更快）**：[在线介绍页](https://q23213ddssd.dpdns.org/system-toolbox/) · [ZIP 直接下载](https://q23213ddssd.dpdns.org/downloads/system-toolbox-windows.zip) · [SHA256 校验清单](https://q23213ddssd.dpdns.org/downloads/system-toolbox-SHA256SUMS.txt)（与 GitHub Release 同一文件，可用哈希核对）
 
 Open-source Windows maintenance toolbox with background queues, resumable downloads, audio conversion and volume mounts. Built with C++17/20.
+
+### v1.10.1
+
+主菜单 38 可将微软签名验证通过的 PsExec64 安装到当前工作目录并加入用户 PATH，或通过 winget 安装、检查 FFmpeg 并刷新 PATH；主菜单 14 的 PsExec 安装和音视频工具的 FFmpeg 检查也可直接使用。已打开的其他终端需要重新打开。发行页提供独立 EXE 和 ZIP。
 
 ### v1.10.0 新增
 
@@ -77,6 +81,7 @@ Open-source Windows maintenance toolbox with background queues, resumable downlo
 | 19 | NPM 工具安装 | 一键安装 AI 工具 / 构建工具 / 框架 / 数据库客户端 |
 | 36 | 系统诊断与报告 | 电池、睡眠、异常重启、更新历史、软件清单 |
 | 37 | DirectX 与 DLL 修复 | 旧版游戏运行库、系统组件与文件检查 |
+| 38 | 安装 PsExec64 / FFmpeg | 设置用户 PATH，并刷新工具箱环境 |
 
 ---
 
@@ -84,7 +89,7 @@ Open-source Windows maintenance toolbox with background queues, resumable downlo
 
 ### 方式一：直接下载 Release（推荐）
 
-下载 [v1.10.0 完整 ZIP](https://github.com/huvubb/system-toolbox/releases/download/v1.10.0/system-toolbox-windows.zip)，解压后直接运行 `system-toolbox.exe`。音乐转换器已内置；下载器会优先使用可选 FastDL DLC，缺失时自动使用系统 curl。音乐转码另需 FFmpeg，可在工具箱内安装。
+下载 [v1.10.1 ZIP](https://github.com/huvubb/system-toolbox/releases/download/v1.10.1/system-toolbox-windows.zip) 解压后运行 `system-toolbox.exe`，或下载[独立 EXE](https://github.com/huvubb/system-toolbox/releases/download/v1.10.1/system-toolbox.exe) 直接运行。音乐转换器已内置；下载器会优先使用可选 FastDL DLC，缺失时自动使用系统 curl。音乐转码另需 FFmpeg，可在工具箱内安装。
 
 发行页附有 `SHA256SUMS.txt`，可用 PowerShell 的 `Get-FileHash .\system-toolbox.exe -Algorithm SHA256` 对照主程序哈希。
 

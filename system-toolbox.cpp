@@ -675,6 +675,9 @@ void DisktoolDlcMenu();
 void VolumeMountMenu();
 void DiagnosticsMenu();
 void DirectXRepairMenu();
+void DependencyInstallMenu();
+bool InstallPsExecToCurrentDirectory();
+bool InstallFFmpegWithPath();
 void CreateIsoBootMedia();
 std::string GetFileSHA256(const std::string& filePath);
 std::string GetLocalExeHash();
@@ -1007,6 +1010,7 @@ int main()
         std::cout << "35. ISO 写入磁盘并制作启动盘\n";
         std::cout << "36. 系统诊断与报告（电池/睡眠/蓝屏/更新/软件）\n";
         std::cout << "37. DirectX 与 DLL 修复\n";
+        std::cout << "38. 安装 PsExec64 / FFmpeg 并设置 PATH\n";
         std::cout << "90. 切换在线/离线模式\n";
         std::cout << " 0. 退出程序\n";
         std::cout << "========================================\n";
@@ -1069,6 +1073,7 @@ int main()
             case 35: CreateIsoBootMedia(); break;
             case 36: DiagnosticsMenu(); break;
             case 37: DirectXRepairMenu(); break;
+            case 38: DependencyInstallMenu(); break;
 
             case 90:  // 切换模式
                 ToggleMode();
@@ -3423,24 +3428,19 @@ void DismWimMenu()
 // 获取 PsExec64.exe 完整路径
 std::string GetPsExecPath()
 {
-    char currentDir[MAX_PATH];
-    GetCurrentDirectoryA(MAX_PATH, currentDir);
-    std::string psexecPath = std::string(currentDir) + "\\PsExec64.exe";
-    
-    DWORD attr = GetFileAttributesA(psexecPath.c_str());
-    if (attr == INVALID_FILE_ATTRIBUTES)
-    {
-        return "PsExec64.exe";
-    }
-    
-    return psexecPath;
+    std::error_code error;
+    auto current = std::filesystem::current_path(error) / L"PsExec64.exe";
+    if (!error && std::filesystem::is_regular_file(current, error)) return PathToUtf8(current);
+    std::vector<wchar_t> found(32768);
+    DWORD length = SearchPathW(nullptr, L"PsExec64.exe", nullptr, static_cast<DWORD>(found.size()), found.data(), nullptr);
+    return length && length < found.size() ? PathToUtf8(std::filesystem::path(found.data())) : "PsExec64.exe";
 }
 
 // 检查 PsExec64.exe 是否存在
 bool CheckPsExec()
 {
     std::string psexecPath = GetPsExecPath();
-    DWORD attr = GetFileAttributesA(psexecPath.c_str());
+    DWORD attr = GetFileAttributesW(Utf8Command(psexecPath).c_str());
     if (attr == INVALID_FILE_ATTRIBUTES)
     {
         std::cout << "未找到 PsExec64.exe！" << std::endl;
@@ -3949,7 +3949,7 @@ void TrustedInstallerMenu()
         std::cout << "13. 以 TrustedInstaller 权限设置文件属性\n";
         std::cout << "14. 以 TrustedInstaller 权限获取文件所有权\n";
         std::cout << "15. 以 TrustedInstaller 权限授予完全控制权\n";
-        std::cout << "16. 下载 PsExec64.exe\n";
+        std::cout << "16. 安装 PsExec64 到当前目录并设置 PATH\n";
         std::cout << " 0. 返回主菜单\n";
         std::cout << "===============================================\n";
         std::cout << "请注意。本功能仅供开发者使用\n";
@@ -3957,7 +3957,7 @@ void TrustedInstallerMenu()
         std::cout << "===============================================\n";
         
         std::string psexecPath = GetPsExecPath();
-        DWORD attr = GetFileAttributesA(psexecPath.c_str());
+        DWORD attr = GetFileAttributesW(Utf8Command(psexecPath).c_str());
         bool psexecExists = (attr != INVALID_FILE_ATTRIBUTES);
         
         char currentDir[MAX_PATH];
@@ -4166,11 +4166,7 @@ else if (choice == 8)
         }
         else if (choice == 16)
         {
-            std::cout << "正在下载 PsExec64.exe..." << std::endl;
-            if (DownloadWithFastdl("https://live.sysinternals.com/PsExec64.exe", "PsExec64.exe"))
-                std::cout << "下载成功！" << std::endl;
-            else
-                std::cout << "下载失败！请手动从 https://live.sysinternals.com/PsExec64.exe 下载" << std::endl;
+            InstallPsExecToCurrentDirectory();
             Pause();
         }
         else
@@ -7781,6 +7777,124 @@ bool RunPowerShellFile(const std::string& script, const std::vector<std::wstring
     return result;
 }
 
+std::filesystem::path FindExecutableOnPath(const wchar_t* name)
+{
+    std::vector<wchar_t> found(32768);
+    DWORD length = SearchPathW(nullptr, name, nullptr, static_cast<DWORD>(found.size()), found.data(), nullptr);
+    if (!length || length >= found.size()) return {};
+    std::error_code error;
+    auto path = std::filesystem::path(found.data());
+    return std::filesystem::is_regular_file(path, error) ? path : std::filesystem::path{};
+}
+
+bool IsTrustedMicrosoftExecutable(const std::filesystem::path& file)
+{
+    const std::string script = R"PS(param([string]$File)
+$ErrorActionPreference='Stop'
+$signature=Get-AuthenticodeSignature -LiteralPath $File
+if ($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate -or
+    $signature.SignerCertificate.Subject -notmatch '(^|,\s*)CN=Microsoft Corporation(,|$)' -or
+    $signature.SignerCertificate.Subject -notmatch '(^|,\s*)O=Microsoft Corporation(,|$)') { exit 1 }
+exit 0
+)PS";
+    return RunPowerShellFile(script, {file.wstring()});
+}
+
+bool InstallPsExecToCurrentDirectory()
+{
+    std::error_code error;
+    auto directory = std::filesystem::current_path(error);
+    if (error || directory.empty() || directory.wstring().find_first_of(L";%") != std::wstring::npos)
+    {
+        std::cout << "当前目录无效，或路径含分号/百分号而不能安全加入 PATH。\n";
+        return false;
+    }
+    auto target = directory / L"PsExec64.exe";
+    if (std::filesystem::exists(target, error))
+    {
+        if (error || !std::filesystem::is_regular_file(target, error) || !IsTrustedMicrosoftExecutable(target))
+        {
+            std::cout << "当前目录已有文件，但微软签名未通过验证，已保留原文件并停止。\n";
+            return false;
+        }
+        std::cout << "当前目录已有经过微软签名验证的 PsExec64。\n";
+    }
+    else
+    {
+        if (error || !g_bOnlineMode) { std::cout << "无法访问当前目录，或当前为离线模式。\n"; return false; }
+        wchar_t tempDir[MAX_PATH], tempFile[MAX_PATH];
+        DWORD length = GetTempPathW(MAX_PATH, tempDir);
+        if (!length || length >= MAX_PATH || !GetTempFileNameW(tempDir, L"pse", 0, tempFile))
+        { std::cout << "无法创建临时下载文件。\n"; return false; }
+        std::filesystem::path staged(tempFile);
+        std::cout << "正在从微软 Sysinternals 下载 PsExec64 并检查签名...\n";
+        bool downloaded = DownloadWithFastdl("https://live.sysinternals.com/PsExec64.exe", PathToUtf8(staged));
+        bool trusted = downloaded && IsTrustedMicrosoftExecutable(staged);
+        bool installed = trusted && MoveFileExW(staged.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH);
+        std::filesystem::remove(staged, error);
+        std::filesystem::remove(std::filesystem::path(staged.wstring() + L".curl-part"), error);
+        if (!installed)
+        {
+            std::cout << (trusted ? "安装失败：当前目录不可写或目标已存在，原文件已保留。\n" : "下载失败或微软签名验证失败，未安装。\n");
+            return false;
+        }
+    }
+    if (!EnsureUserPath(directory.wstring()))
+    {
+        std::cout << "PsExec64 已放在 " << PathToUtf8(target) << "，但无法设置用户 PATH。\n";
+        return false;
+    }
+    RefreshEnvironmentPath();
+    std::cout << "PsExec64 已就绪：" << PathToUtf8(target) << "\n当前进程和用户 PATH 已刷新；其他已打开的终端需重新打开。\n";
+    return true;
+}
+
+bool InstallFFmpegWithPath()
+{
+    RefreshEnvironmentPath();
+    auto executable = FindExecutableOnPath(L"ffmpeg.exe");
+    if (executable.empty())
+    {
+        if (!g_bOnlineMode) { std::cout << "未找到 FFmpeg；离线模式无法通过 winget 安装。\n"; return false; }
+        std::cout << "正在通过 winget 安装 Gyan.FFmpeg，完成后检查命令和 PATH。\n";
+        if (!RunCmd("winget install --id Gyan.FFmpeg --exact --source winget --silent --accept-package-agreements --accept-source-agreements", true, true))
+        { std::cout << "安装未完成，请检查 winget 和网络后重试。\n"; return false; }
+        RegisterInstalledToolPaths("winget install Gyan.FFmpeg");
+        RefreshEnvironmentPath();
+        executable = FindExecutableOnPath(L"ffmpeg.exe");
+        if (executable.empty())
+        {
+            auto links = std::filesystem::path(ExpandPathVariables(L"%LOCALAPPDATA%\\Microsoft\\WinGet\\Links"));
+            std::error_code error;
+            if (std::filesystem::is_regular_file(links / L"ffmpeg.exe", error)) executable = links / L"ffmpeg.exe";
+        }
+    }
+    if (executable.empty()) { std::cout << "安装后未找到 ffmpeg.exe，请检查 winget 安装结果。\n"; return false; }
+    std::cout << "检查 FFmpeg：" << PathToUtf8(executable) << "\n";
+    if (!RunProcessArguments({executable.wstring(), L"-version"}))
+    { std::cout << "FFmpeg 无法正常启动，请修复安装后重试。\n"; return false; }
+    auto directory = executable.parent_path();
+    if (directory.wstring().find_first_of(L";%") != std::wstring::npos || !EnsureUserPath(directory.wstring()))
+    { std::cout << "FFmpeg 可运行，但无法将其目录加入用户 PATH。\n"; return false; }
+    RefreshEnvironmentPath();
+    std::cout << "FFmpeg 已就绪，当前进程和用户 PATH 已刷新；其他已打开的终端需重新打开。\n";
+    return true;
+}
+
+void DependencyInstallMenu()
+{
+    while (true)
+    {
+        std::cout << "\n=== 常用工具安装 ===\n1. 安装 PsExec64 到当前目录并设置 PATH\n2. 检查/安装 FFmpeg 并设置 PATH\n0. 返回\n";
+        int choice = GetIntInput("请选择: ");
+        if (choice == 0 || !std::cin) return;
+        if (choice == 1) InstallPsExecToCurrentDirectory();
+        else if (choice == 2) InstallFFmpegWithPath();
+        else { std::cout << "无效选项。\n"; continue; }
+        Pause();
+    }
+}
+
 // 保存/读取上次运行的版本
 
 // 获取本地 exe 的 SHA256
@@ -8201,17 +8315,12 @@ bool RunFFmpeg(const std::string& cmd, bool waitForResult = false)
 {
     if (GetTaskQueue().enabled && !waitForResult)
     {
-        std::cout << "后台媒体任务 ID: " << GetTaskQueue().Add(L"cmd.exe /d /s /c \"" + Utf8Command(cmd) + L"\"") << "\n";
-        return true;
+        int id = GetTaskQueue().Add(L"cmd.exe /d /s /c \"" + Utf8Command(cmd) + L"\"", cmd);
+        if (id) std::cout << "[已排队] 音视频任务 " << id << "，可在主菜单 31 查看进度。\n";
+        else std::cout << "[失败] 无法创建音视频任务，请检查临时目录。\n";
+        return id != 0;
     }
-    std::string gbkCmd = Utf8ToGbk(cmd);
-    std::cout << ">> " << cmd << std::endl;
-    int ret = system(gbkCmd.c_str());
-    if (ret != 0)
-    {
-        std::cout << "\n[提示] 命令执行失败（返回码: " << ret << "）\n";
-    }
-    return ret == 0;
+    return RunCmd(cmd, true, true);
 }
 
 std::wstring QuoteProcessArgument(const std::wstring& argument)
@@ -8819,7 +8928,7 @@ void MediaToolsMenu()
         ClearScreen();
         std::cout << "========== 音视频工具 ==========\n";
         std::cout << "=== 环境与硬件 ===\n";
-        std::cout << " 1. 检查 FFmpeg 环境\n";
+        std::cout << " 1. 检查/安装 FFmpeg 并设置 PATH\n";
         std::cout << " 2. GPU 硬件加速检测\n";
         std::cout << " 3. GPU 硬解码测试\n";
         std::cout << "\n=== 智能转换（自动硬解） ===\n";
@@ -8869,19 +8978,7 @@ void MediaToolsMenu()
             {
                 ClearScreen();
                 std::cout << "========== FFmpeg 环境检查 ==========\n";
-                int ret = system("ffmpeg -version 2>&1");
-                if (ret == 0)
-                    std::cout << "\n[OK] FFmpeg 已安装\n";
-                else
-                {
-                    std::cout << "\n[FAIL] FFmpeg 未安装\n\n";
-                    std::cout << "是否通过 winget 安装？(y/n): ";
-                    char c;
-                    std::cin >> c;
-                    std::cin.ignore();
-                    if (c == 'y' || c == 'Y')
-                        RunCmd("winget install Gyan.FFmpeg --silent --accept-package-agreements --accept-source-agreements");
-                }
+                InstallFFmpegWithPath();
                 Pause();
                 break;
             }

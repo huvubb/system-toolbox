@@ -1,6 +1,6 @@
 {
   "name": "system-toolbox",
-  "version": "1.10.0",
+  "version": "1.10.1",
   "description": "Open-source Windows maintenance toolbox with bundled native binaries, background queues, audio and disk tools.",
   "bin": {
     "system-toolbox": "cli.js"

@@ -118,6 +118,8 @@ int main()
     assert(RunRepairOperation({}) == -1);
     assert(RunRepairOperation({L"powershell.exe", L"-NoProfile", L"-NonInteractive", L"-Command", L"exit 0"}) == 0);
     assert(RunRepairOperation({L"powershell.exe", L"-NoProfile", L"-NonInteractive", L"-Command", L"exit 7"}) == 7);
+    assert(!FindExecutableOnPath(L"cmd.exe").empty());
+    assert(FindExecutableOnPath(L"toolbox-this-file-does-not-exist-9a4e.exe").empty());
     assert(DescribeCommandResult("cmd /d /c exit 0", 0).find("成功") != std::string::npos);
     for (const std::string command : {"winget install --id Example.App", "msiexec /i package.msi", "dism /online /restorehealth"})
         for (const int code : {3010, 1641})
@@ -259,6 +261,9 @@ int main()
 
     auto root = std::filesystem::current_path() / ("testdata-" + std::to_string(GetCurrentProcessId()));
     assert(std::filesystem::create_directory(root));
+    auto invalidSignature = root / L"not-signed.exe";
+    WriteFile(invalidSignature, "not a signed executable");
+    assert(!IsTrustedMicrosoftExecutable(invalidSignature));
     auto diagnosticsScript = root / L"diagnostics.ps1";
     WriteFile(diagnosticsScript, std::string("\xEF\xBB\xBF") + GetDiagnosticsReportScript());
     assert(RunPowerShellFile(R"PS(param([string]$Source)
@@ -446,7 +451,7 @@ Write-Host 'ISO media script parses; protected and ambiguous disks rejected with
     assert(!CheckJustUpdated());
     assert(GetLastVersion() == GetLocalExeHash());
 
-    for (const std::string choices : {"abc\n0\n", "0\n", "36\n0\n0\n", "37\n0\n0\n", ""})
+    for (const std::string choices : {"abc\n0\n", "0\n", "36\n0\n0\n", "37\n0\n0\n", "38\n0\n0\n", ""})
     {
         std::istringstream menuInput(choices);
         std::ostringstream output;
@@ -459,6 +464,8 @@ Write-Host 'ISO media script parses; protected and ambiguous disks rejected with
             assert(output.str().find("5. 软件清单") != std::string::npos);
         if (choices == "37\n0\n0\n")
             assert(output.str().find("DirectX 与 DLL 修复") != std::string::npos);
+        if (choices == "38\n0\n0\n")
+            assert(output.str().find("安装 PsExec64 到当前目录并设置 PATH") != std::string::npos);
         std::cout.rdbuf(oldOutput);
         std::cin.rdbuf(oldInput);
         std::cin.clear();
