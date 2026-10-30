@@ -1,4 +1,4 @@
-// 多功能系统工具箱（构建标识由程序 SHA256 自动生成）
+﻿// 多功能系统工具箱（构建标识由程序 SHA256 自动生成）
 // 编译环境：Visual Studio 2019/2022 或 MinGW-w64，Windows 10/11
 // 注意：请将本文件保存为 UTF-8 with BOM 格式，避免中文乱码
 // 运行需要管理员权限，部分操作有风险，使用前请阅读免责声明
@@ -294,6 +294,61 @@ void RegisterInstalledToolPaths(const std::string& command)
 #include <mutex>
 #include <memory>
 
+std::string GetCommandProgram(const std::string& command)
+{
+    const auto start = command.find_first_not_of(" \t");
+    if (start == std::string::npos) return {};
+    const bool quoted = command[start] == '"';
+    const auto end = command.find_first_of(quoted ? "\"" : " \t", start + (quoted ? 1 : 0));
+    std::string name = command.substr(start + (quoted ? 1 : 0), end == std::string::npos ? end : end-start-(quoted ? 1 : 0));
+    const auto slash = name.find_last_of("\\/");
+    if (slash != std::string::npos) name.erase(0, slash+1);
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (name.size() > 4 && name.substr(name.size()-4) == ".exe") name.resize(name.size()-4);
+    return name;
+}
+
+bool IsSuccessfulCommand(const std::string& command, int result)
+{
+    const auto name = GetCommandProgram(command);
+    return result == 0 || ((result == 3010 || result == 1641) &&
+        (name == "winget" || name == "msiexec" || name == "dism"));
+}
+
+std::string DescribeCommandResult(const std::string& command, int result)
+{
+    if (IsSuccessfulCommand(command, result))
+        return result == 0 ? "[成功] 操作已完成。" : "[成功] 操作已完成，需要重启电脑后生效，请先保存工作。";
+    if (result == -1) return "[失败] 无法启动所需工具，请确认工具已安装且具有运行权限。";
+    return "[失败] 操作未完成，请根据上方提示检查输入、路径和运行权限。（诊断代码 " + std::to_string(result) + "）";
+}
+
+std::string DescribeTaskState(const std::string& state, bool paused)
+{
+    if (paused && (state == "waiting" || state == "running")) return "已暂停";
+    if (state == "waiting") return "等待执行";
+    if (state == "running") return "正在运行";
+    if (state == "done") return "已完成";
+    if (state == "failed") return "执行失败";
+    return "状态未知";
+}
+
+std::string GetCommandLabel(const std::string& command)
+{
+    const auto name = GetCommandProgram(command);
+    if (name == "winget") return "软件安装与管理";
+    if (name == "dism" || name == "sfc") return "Windows 系统维护";
+    if (name == "powercfg") return "电源与休眠设置";
+    if (name == "reg") return "系统配置";
+    if (name == "sc" || name == "net") return "Windows 服务管理";
+    if (name == "w32tm") return "系统时间同步";
+    if (name == "del") return "文件清理";
+    if (name == "chkdsk") return "磁盘检查";
+    if (name == "npm") return "npm 软件包管理";
+    if (name == "curl" || name == "fastdl") return "文件下载";
+    return "工具操作";
+}
+
 class TaskQueue
 {
 public:
@@ -301,6 +356,7 @@ public:
     {
         int id, priority = 1;
         std::wstring command, log;
+        std::string originalCommand;
         HANDLE process = nullptr, job = nullptr;
         std::string state = "waiting";
         DWORD result = 0;
@@ -321,12 +377,13 @@ public:
             if (task->job && task->state == "running") TerminateJobObject(task->job, ERROR_CANCELLED);
     }
 
-    int Add(const std::wstring& command)
+    int Add(const std::wstring& command, const std::string& originalCommand = "")
     {
         std::lock_guard<std::mutex> lock(mutex);
         auto task = std::make_shared<Task>();
         task->id = static_cast<int>(tasks.size()) + 1;
         task->command = command;
+        task->originalCommand = originalCommand;
         wchar_t temp[MAX_PATH];
         if (!GetTempPathW(MAX_PATH, temp)) return 0;
         task->log = std::wstring(temp) + L"toolbox-task-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(task->id) + L".log";
@@ -398,11 +455,10 @@ private:
                     if (!QueryInformationJobObject(task->job, JobObjectBasicAccountingInformation, &info, sizeof(info), nullptr) || info.ActiveProcesses != 0)
                     { if (!task->paused) ++running; continue; }
                     GetExitCodeProcess(task->process, &task->result);
-                    task->state = task->result == 0 ? "done" : "failed";
-                    if (task->result == 0 && task->command.find(L"winget install ") != std::wstring::npos)
+                    task->state = IsSuccessfulCommand(task->originalCommand, static_cast<int>(task->result)) ? "done" : "failed";
+                    if (task->state == "done" && task->originalCommand.rfind("winget install ", 0) == 0)
                     {
-                        std::string command(task->command.begin(), task->command.end());
-                        RegisterInstalledToolPaths(command);
+                        RegisterInstalledToolPaths(task->originalCommand);
                         RefreshEnvironmentPath();
                     }
                 }
@@ -468,8 +524,13 @@ void TaskQueueMenu()
             std::lock_guard<std::mutex> lock(queue.mutex);
             std::cout << "\n=== 后台任务队列 ===\n退出工具箱将结束未完成的队列任务。\n后台提交: " << (queue.enabled ? "开" : "关") << "  并发: " << queue.parallel << "\n";
             for (const auto& task : queue.tasks)
-                std::cout << task->id << ". " << task->state << (task->paused ? " [暂停]" : "")
-                          << " 优先级=" << task->priority << " 返回码=" << task->result << "\n";
+            {
+                std::cout << "任务 " << task->id << " · " << GetCommandLabel(task->originalCommand)
+                          << " · " << DescribeTaskState(task->state, task->paused)
+                          << " · 优先级：" << (task->priority == 2 ? "高" : task->priority == 0 ? "低" : "普通") << "\n";
+                if (task->state == "done" || task->state == "failed")
+                    std::cout << "  " << DescribeCommandResult(task->originalCommand, static_cast<int>(task->result)) << "\n";
+            }
         }
         std::cout << "1. 切换后台提交  2. 暂停  3. 继续  4. 优先级  5. 日志  6. 并发数  0. 返回\n";
         std::string line;
@@ -521,29 +582,45 @@ std::wstring Utf8Command(const std::string& text)
 }
 
 // 执行系统命令
-void RunCmd(const std::string& cmd, bool showOutput = true)
+bool RunCmd(const std::string& cmd, bool showOutput = true, bool forceForeground = false)
 {
-    if (GetTaskQueue().enabled)
+    if (GetTaskQueue().enabled && !forceForeground)
     {
-        int id = GetTaskQueue().Add(L"cmd.exe /d /s /c \"" + Utf8Command(cmd) + L"\"");
-        std::cout << "后台任务 ID: " << id << "（主菜单 31 控制）\n";
-        return;
+        int id = GetTaskQueue().Add(L"cmd.exe /d /s /c \"" + Utf8Command(cmd) + L"\"", cmd);
+        if (id) std::cout << "[已排队] " << GetCommandLabel(cmd) << "，任务 " << id << "。可在主菜单 31 查看进度和日志。\n";
+        else std::cout << "[失败] 无法创建后台任务，请检查临时目录是否可写。\n";
+        return false;
     }
-    std::cout << ">> " << cmd << std::endl;
+    std::cout << "\n正在处理：" << GetCommandLabel(cmd) << "...\n";
     int ret;
+    std::filesystem::path log;
     if (!showOutput)
-        ret = system((cmd + " >nul 2>&1").c_str());
+    {
+        auto directory = GetToolboxDataDirectory();
+        std::error_code error;
+        if (!directory.empty())
+        {
+            directory /= L"logs";
+            std::filesystem::create_directories(directory, error);
+            if (!error) log = directory / (L"operation-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) + L".log");
+        }
+        const std::wstring output = log.empty() ? L"nul" : L"\"" + log.wstring() + L"\"";
+        ret = _wsystem((L"(" + Utf8Command(cmd) + L") >" + output + L" 2>&1").c_str());
+    }
     else
     {
-        ret = system(cmd.c_str());
-        std::cout << "返回码: " << ret << std::endl;
+        ret = _wsystem(Utf8Command(cmd).c_str());
     }
+    std::cout << DescribeCommandResult(cmd, ret) << std::endl;
+    if (!IsSuccessfulCommand(cmd, ret) && !log.empty())
+        std::cout << "详细记录：" << PathToUtf8(log) << "\n";
     if (ret == 0 && cmd.rfind("winget install ", 0) == 0)
     {
         RegisterInstalledToolPaths(cmd);
         RefreshEnvironmentPath();
         std::cout << "已刷新当前程序的 PATH。\n";
     }
+    return IsSuccessfulCommand(cmd, ret);
 }
 
 // 获取用户输入的字符串
@@ -565,7 +642,7 @@ bool IsRunAsAdmin();
 bool ElevateSelf();
 void ClearScreen();
 void Pause();
-void RunCmd(const std::string& cmd, bool showOutput);
+bool RunCmd(const std::string& cmd, bool showOutput, bool forceForeground);
 std::string GetInput(const std::string& prompt);
 int GetIntInput(const std::string& prompt, int defaultVal = -1);
 
@@ -596,6 +673,8 @@ bool InstallLegacyQQMusic();
 void FastdlMenu();
 void DisktoolDlcMenu();
 void VolumeMountMenu();
+void DiagnosticsMenu();
+void DirectXRepairMenu();
 void CreateIsoBootMedia();
 std::string GetFileSHA256(const std::string& filePath);
 std::string GetLocalExeHash();
@@ -926,6 +1005,8 @@ int main()
         std::cout << "33. DiskTool DLC\n";
         std::cout << "34. 卷与镜像挂载管理\n";
         std::cout << "35. ISO 写入磁盘并制作启动盘\n";
+        std::cout << "36. 系统诊断与报告（电池/睡眠/蓝屏/更新/软件）\n";
+        std::cout << "37. DirectX 与 DLL 修复\n";
         std::cout << "90. 切换在线/离线模式\n";
         std::cout << " 0. 退出程序\n";
         std::cout << "========================================\n";
@@ -986,6 +1067,8 @@ int main()
             case 33: DisktoolDlcMenu(); break;
             case 34: VolumeMountMenu(); break;
             case 35: CreateIsoBootMedia(); break;
+            case 36: DiagnosticsMenu(); break;
+            case 37: DirectXRepairMenu(); break;
 
             case 90:  // 切换模式
                 ToggleMode();
@@ -1189,47 +1272,41 @@ void CleanDiskC()
     if (selection == "7" || selection.find('1') != std::string::npos)
     {
         std::cout << "\n[清理] 用户临时文件夹...\n";
-        RunCmd("del /q /f /s \"%TEMP%\\*\" >nul 2>&1", false);
-        std::cout << "  完成\n";
+        RunCmd("del /q /f /s \"%TEMP%\\*\"", false);
     }
 
     if (selection == "7" || selection.find('2') != std::string::npos)
     {
         std::cout << "\n[清理] Windows 临时文件夹...\n";
-        RunCmd("del /q /f /s \"C:\\Windows\\Temp\\*\" >nul 2>&1", false);
-        std::cout << "  完成\n";
+        RunCmd("del /q /f /s \"C:\\Windows\\Temp\\*\"", false);
     }
 
     if (selection == "7" || selection.find('3') != std::string::npos)
     {
         std::cout << "\n[清理] 回收站...\n";
-        RunCmd("powershell -Command \"Clear-RecycleBin -Force -ErrorAction SilentlyContinue\"", false);
-        std::cout << "  完成\n";
+        RunCmd("powershell -Command \"Clear-RecycleBin -Force -ErrorAction Stop\"", false);
     }
 
     if (selection == "7" || selection.find('4') != std::string::npos)
     {
         std::cout << "\n[清理] 缩略图缓存...\n";
-        RunCmd("del /q /f /s \"%LOCALAPPDATA%\\Microsoft\\Windows\\Explorer\\thumbcache_*.db\" >nul 2>&1", false);
-        std::cout << "  完成\n";
+        RunCmd("del /q /f /s \"%LOCALAPPDATA%\\Microsoft\\Windows\\Explorer\\thumbcache_*.db\"", false);
     }
 
     if (selection == "7" || selection.find('5') != std::string::npos)
     {
         std::cout << "\n[清理] 预读取文件...\n";
-        RunCmd("del /q /f /s \"C:\\Windows\\Prefetch\\*\" >nul 2>&1", false);
-        std::cout << "  完成\n";
+        RunCmd("del /q /f /s \"C:\\Windows\\Prefetch\\*\"", false);
     }
 
     if (selection == "7" || selection.find('6') != std::string::npos)
     {
         std::cout << "\n[清理] Windows 错误报告...\n";
-        RunCmd("del /q /f /s \"C:\\ProgramData\\Microsoft\\Windows\\WER\\*\" >nul 2>&1", false);
-        std::cout << "  完成\n";
+        RunCmd("del /q /f /s \"C:\\ProgramData\\Microsoft\\Windows\\WER\\*\"", false);
     }
 
     std::cout << "\n========================================\n";
-    std::cout << "           C盘清理完成！\n";
+    std::cout << "清理任务已处理，请查看上方各项结果；已排队的任务可在菜单 31 查看。\n";
     std::cout << "========================================\n";
     Pause();
 }
@@ -1247,17 +1324,17 @@ void ManageWindowsUpdate()
 
     if (choice == 1)
     {
-        RunCmd("reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU\" /v NoAutoUpdate /t REG_DWORD /d 1 /f");
-        RunCmd("sc stop wuauserv");
-        RunCmd("sc config wuauserv start= disabled");
-        std::cout << "Windows 更新已禁用。" << std::endl;
+        const bool policy = RunCmd("reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU\" /v NoAutoUpdate /t REG_DWORD /d 1 /f", true, true);
+        const bool stopped = RunCmd("sc stop wuauserv", true, true);
+        const bool configured = RunCmd("sc config wuauserv start= disabled", true, true);
+        std::cout << (policy && stopped && configured ? "Windows 更新禁用步骤已完成。" : "部分步骤未完成，请查看上方结果并确认 Windows 更新状态。") << std::endl;
     }
     else if (choice == 2)
     {
-        RunCmd("reg delete \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU\" /v NoAutoUpdate /f");
-        RunCmd("sc config wuauserv start= auto");
-        RunCmd("sc start wuauserv");
-        std::cout << "Windows 更新已恢复为自动。" << std::endl;
+        const bool policy = RunCmd("reg delete \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU\" /v NoAutoUpdate /f", true, true);
+        const bool configured = RunCmd("sc config wuauserv start= auto", true, true);
+        const bool started = RunCmd("sc start wuauserv", true, true);
+        std::cout << (policy && configured && started ? "Windows 更新恢复步骤已完成。" : "部分步骤未完成，请查看上方结果并确认 Windows 更新状态。") << std::endl;
     }
     else
         std::cout << "操作取消。" << std::endl;
@@ -1456,9 +1533,9 @@ void SystemFileRepair()
     std::cout << "是否开始？(y/n): ";
     char c; std::cin >> c; std::cin.ignore();
     if (c != 'y' && c != 'Y') { std::cout << "操作已取消。" << std::endl; Pause(); return; }
-    RunCmd("sfc /scannow");
-    RunCmd("DISM /Online /Cleanup-Image /RestoreHealth");
-    std::cout << "系统文件修复流程结束，请查看上方输出。" << std::endl;
+    const bool systemFiles = RunCmd("sfc /scannow", true, true);
+    const bool image = RunCmd("DISM /Online /Cleanup-Image /RestoreHealth", true, true);
+    std::cout << (systemFiles && image ? "系统文件和映像修复步骤已完成，请查看扫描结果。" : "部分修复步骤未完成，请查看上方提示。") << std::endl;
     Pause();
 }
 
@@ -1886,8 +1963,7 @@ void ExtractZip()
     std::string destPath = GetInput("请输入解压目标文件夹路径: ");
     if (destPath.empty()) { std::cout << "目标路径不能为空！" << std::endl; Pause(); return; }
     std::string psCmd = "powershell -Command \"Expand-Archive -Path '" + zipPath + "' -DestinationPath '" + destPath + "' -Force\"";
-    RunCmd(psCmd);
-    std::cout << "解压完成。" << std::endl;
+    if (RunCmd(psCmd)) std::cout << "文件已解压到：" << destPath << std::endl;
     Pause();
 }
 
@@ -1901,8 +1977,8 @@ void ManageHibernate()
     std::cout << " 3. 返回\n";
     std::cout << "===============================\n";
     int choice = GetIntInput("请选择: ");
-    if (choice == 1) { RunCmd("powercfg /hibernate off"); std::cout << "休眠已关闭，快速启动已禁用。" << std::endl; }
-    else if (choice == 2) { RunCmd("powercfg /hibernate on"); std::cout << "休眠已开启，快速启动已启用。" << std::endl; }
+    if (choice == 1) { if (RunCmd("powercfg /hibernate off")) std::cout << "休眠已关闭，快速启动已禁用。" << std::endl; }
+    else if (choice == 2) { if (RunCmd("powercfg /hibernate on")) std::cout << "休眠已开启。快速启动是否启用还取决于系统设置。" << std::endl; }
     else std::cout << "操作取消。" << std::endl;
     Pause();
 }
@@ -1923,56 +1999,49 @@ void ManageVirtualMemory()
 
     if (choice == 1)
     {
-        RunCmd("wmic computersystem set AutomaticManagedPagefile=True");
-        std::cout << "已开启系统自动管理。" << std::endl;
+        if (RunCmd("wmic computersystem set AutomaticManagedPagefile=True", true, true))
+            std::cout << "已提交系统自动管理设置，可能需要重启后生效。" << std::endl;
     }
     else if (choice == 2 || choice == 3)
     {
         std::string drive = GetInput("请输入盘符（如 D，也可以是 C）: ");
-        if (drive.empty()) { std::cout << "盘符无效！" << std::endl; Pause(); return; }
-        drive = std::string(1, toupper(drive[0]));
+        if (drive.empty() || !std::isalpha(static_cast<unsigned char>(drive[0]))) { std::cout << "盘符无效！" << std::endl; Pause(); return; }
+        drive = std::string(1, static_cast<char>(std::toupper(static_cast<unsigned char>(drive[0]))));
         std::string pageName = drive + ":\\\\pagefile.sys";
-        RunCmd("wmic computersystem set AutomaticManagedPagefile=False");
-        std::string createCmd = "wmic pagefileset create name=\"" + pageName + "\"";
-        RunCmd(createCmd);
-
+        int initial = 0, maximum = 0;
         if (choice == 2)
         {
-            int initial = GetIntInput("请输入初始大小（MB）: ");
-            int maximum = GetIntInput("请输入最大大小（MB）: ");
-            if (initial <= 0 || maximum <= 0 || initial > maximum) std::cout << "大小设置无效！" << std::endl;
-            else
-            {
-                std::string setCmd = "wmic pagefileset where name=\"" + pageName + "\" set InitialSize=" + std::to_string(initial) + ",MaximumSize=" + std::to_string(maximum);
-                RunCmd(setCmd);
-                std::cout << "分页文件已创建并设置大小。" << std::endl;
-            }
+            initial = GetIntInput("请输入初始大小（MB）: ");
+            maximum = GetIntInput("请输入最大大小（MB）: ");
+            if (initial <= 0 || maximum <= 0 || initial > maximum) { std::cout << "大小设置无效，未更改系统设置。" << std::endl; Pause(); return; }
         }
         else
         {
             MEMORYSTATUSEX statex;
             statex.dwLength = sizeof(statex);
-            GlobalMemoryStatusEx(&statex);
+            if (!GlobalMemoryStatusEx(&statex)) { std::cout << "无法读取内存大小，未更改系统设置。\n"; Pause(); return; }
             DWORDLONG totalPhysMB = statex.ullTotalPhys / (1024 * 1024);
-            int initial = static_cast<int>(totalPhysMB * 1.5);
-            int maximum = static_cast<int>(totalPhysMB * 3);
+            initial = static_cast<int>(totalPhysMB * 1.5);
+            maximum = static_cast<int>(totalPhysMB * 3);
             if (initial < 1024) initial = 1024;
             if (maximum < initial) maximum = initial * 2;
             std::cout << "检测到物理内存约 " << totalPhysMB << " MB，建议初始 " << initial << " MB，最大 " << maximum << " MB。" << std::endl;
-            std::string setCmd = "wmic pagefileset where name=\"" + pageName + "\" set InitialSize=" + std::to_string(initial) + ",MaximumSize=" + std::to_string(maximum);
-            RunCmd(setCmd);
-            std::cout << "分页文件已自动创建。" << std::endl;
         }
+        if (!RunCmd("wmic computersystem set AutomaticManagedPagefile=False", true, true)) { Pause(); return; }
+        std::string createCmd = "wmic pagefileset create name=\"" + pageName + "\"";
+        if (!RunCmd(createCmd, true, true)) { std::cout << "分页文件未创建，请检查当前分页文件设置；自动管理可能已关闭。\n"; Pause(); return; }
+        std::string setCmd = "wmic pagefileset where name=\"" + pageName + "\" set InitialSize=" + std::to_string(initial) + ",MaximumSize=" + std::to_string(maximum);
+        if (RunCmd(setCmd, true, true)) std::cout << "分页文件配置已提交，可能需要重启后生效。" << std::endl;
+        else std::cout << "分页文件已创建，但大小设置失败，请检查配置。" << std::endl;
     }
     else if (choice == 4)
     {
         std::string drive = GetInput("请输入要删除分页文件的盘符（如 C）: ");
-        if (drive.empty()) { std::cout << "盘符无效！" << std::endl; Pause(); return; }
-        drive = std::string(1, toupper(drive[0]));
+        if (drive.empty() || !std::isalpha(static_cast<unsigned char>(drive[0]))) { std::cout << "盘符无效！" << std::endl; Pause(); return; }
+        drive = std::string(1, static_cast<char>(std::toupper(static_cast<unsigned char>(drive[0]))));
         std::string pageName = drive + ":\\\\pagefile.sys";
         std::string delCmd = "wmic pagefileset where name=\"" + pageName + "\" delete";
-        RunCmd(delCmd);
-        std::cout << "已尝试删除 " << drive << " 盘上的分页文件。" << std::endl;
+        if (RunCmd(delCmd, true, true)) std::cout << "已提交 " << drive << " 盘的分页文件删除请求，可能需要重启后生效。" << std::endl;
     }
     else if (choice == 5)
     {
@@ -2956,8 +3025,9 @@ void DismWimMenu()
                 std::cin.ignore();
                 if (c == 'y' || c == 'Y')
                 {
-                    RunCmd("DISM /Online /Cleanup-Image /RestoreHealth");
-                    RunCmd("sfc /scannow");
+                    const bool image = RunCmd("DISM /Online /Cleanup-Image /RestoreHealth", true, true);
+                    const bool files = RunCmd("sfc /scannow", true, true);
+                    std::cout << (image && files ? "两项检查均已完成，请查看扫描结果。\n" : "部分检查未完成，请查看上方提示。\n");
                 }
                 Pause();
                 break;
@@ -3252,9 +3322,9 @@ void DismWimMenu()
             {
                 ClearScreen();
                 std::cout << "========== 清理临时文件 ==========\n\n";
-                RunCmd("dism /online /cleanup-image /startcomponentcleanup");
-                RunCmd("del /q /f /s \"C:\\Windows\\Temp\\*\" >nul 2>&1", false);
-                std::cout << "清理完成。\n";
+                const bool components = RunCmd("dism /online /cleanup-image /startcomponentcleanup", true, true);
+                const bool temporary = RunCmd("del /q /f /s \"C:\\Windows\\Temp\\*\"", false, true);
+                std::cout << (components && temporary ? "清理步骤已完成。\n" : "部分清理步骤未完成，请查看上方结果。\n");
                 Pause();
                 break;
             }
@@ -3265,8 +3335,7 @@ void DismWimMenu()
                 std::string path = GetInput("保存路径（如 C:\\sysinfo.txt）: ");
                 if (!path.empty())
                 {
-                    RunCmd("systeminfo > \"" + path + "\"");
-                    std::cout << "已导出到: " << path << std::endl;
+                    if (RunCmd("systeminfo > \"" + path + "\"", true, true)) std::cout << "已导出到: " << path << std::endl;
                 }
                 Pause();
                 break;
@@ -3282,12 +3351,18 @@ void DismWimMenu()
                 std::cin.ignore();
                 if (c == 'y' || c == 'Y')
                 {
-                    RunCmd("net stop wuauserv");
-                    RunCmd("net stop bits");
-                    RunCmd("ren C:\\Windows\\SoftwareDistribution SoftwareDistribution.old");
-                    RunCmd("net start wuauserv");
-                    RunCmd("net start bits");
-                    std::cout << "\n修复完成。请重新运行 Windows Update。\n";
+                    const bool stoppedUpdate = RunCmd("net stop wuauserv", true, true);
+                    const bool stoppedBits = RunCmd("net stop bits", true, true);
+                    bool renamed = false;
+                    if (stoppedUpdate && stoppedBits)
+                        renamed = RunCmd("ren C:\\Windows\\SoftwareDistribution SoftwareDistribution.old", true, true);
+                    else
+                        std::cout << "未确认两项服务均已停止，跳过重命名缓存。\n";
+                    const bool startedUpdate = !stoppedUpdate || RunCmd("net start wuauserv", true, true);
+                    const bool startedBits = !stoppedBits || RunCmd("net start bits", true, true);
+                    std::cout << (stoppedUpdate && stoppedBits && renamed && startedUpdate && startedBits
+                        ? "\n修复步骤完成，请重新运行 Windows Update。\n"
+                        : "\n部分步骤未完成，请查看上方结果并检查服务状态。\n");
                 }
                 Pause();
                 break;
@@ -4129,9 +4204,7 @@ void SyncSystemTime()
     }
     
     std::cout << "\n正在同步时间...\n";
-    RunCmd("w32tm /resync /force");
-    
-    std::cout << "时间同步完成。" << std::endl;
+    if (RunCmd("w32tm /resync /force")) std::cout << "系统时间已完成同步。" << std::endl;
     Pause();
 }
 
@@ -7563,8 +7636,9 @@ case 15:
             case 50: wingetInstall("MSYS2.MSYS2"); Pause(); break;
             case 51:
                 ClearScreen();
-                RunCmd("cmake -B \"" + buildDir + "\" -S .");
-                RunCmd("cmake --build \"" + buildDir + "\" --config Release");
+                if (RunCmd("cmake -B \"" + buildDir + "\" -S .", true, true))
+                    RunCmd("cmake --build \"" + buildDir + "\" --config Release", true, true);
+                else std::cout << "CMake 配置失败，已跳过构建。\n";
                 Pause();
                 break;
             case 52:
@@ -7594,7 +7668,8 @@ bool RunProcessArguments(const std::vector<std::wstring>& arguments, bool backgr
     if (background)
     {
         int id = GetTaskQueue().Add(command);
-        std::cout << "后台下载任务 ID: " << id << "\n";
+        if (id) std::cout << "[已排队] 任务 " << id << "，可在主菜单 31 查看进度、暂停或调整优先级。\n";
+        else std::cout << "[失败] 无法创建后台任务，请检查临时目录。\n";
         return id != 0;
     }
     STARTUPINFOW startup{};
@@ -7657,7 +7732,8 @@ bool InstallLegacyQQMusic()
     auto installer = directory / L"QQMusic_Setup_1951.exe";
     const std::string hash = "86841D77C59FE4752C2A799F57B74FAF25B07390612767DDC0B071A8CDB49F74";
     if (GetFileSHA256(PathToUtf8(installer)) != hash &&
-        !DownloadWithFastdl("https://q23213ddssd.dpdns.org/downloads/QQMusic_Setup_1951.exe", PathToUtf8(installer)))
+        !DownloadWithFastdl("https://q23213ddssd.dpdns.org/downloads/QQMusic_Setup_1951.exe", PathToUtf8(installer)) &&
+        !DownloadWithFastdl("https://web.archive.org/web/20240109id_/https://dldir1v6.qq.com/music/clntupate/QQMusic_Setup_1951.exe", PathToUtf8(installer)))
         return false;
     if (GetFileSHA256(PathToUtf8(installer)) != hash) { std::cout << "安装包校验失败，未启动。\n"; return false; }
     std::cout << "将启动 QQ音乐 19.51 安装向导，可能影响当前安装版本。\n";
@@ -8236,8 +8312,10 @@ bool RunMusicConverter(const std::string& input, const std::string& output,
     }
     if (GetTaskQueue().enabled)
     {
-        std::cout << "后台音乐任务 ID: " << GetTaskQueue().Add(command) << "\n";
-        return true;
+        int id = GetTaskQueue().Add(command);
+        if (id) std::cout << "[已排队] 音乐转换任务 " << id << "，可在主菜单 31 查看进度。\n";
+        else std::cout << "[失败] 无法创建音乐转换任务，请检查临时目录。\n";
+        return id != 0;
     }
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
@@ -11690,6 +11768,304 @@ void CreateIsoBootMedia()
     if (!size || size >= program.size()) { std::cout << "无法确认工具箱所在路径。\n"; return; }
     RunPowerShellFile(GetIsoBootMediaScript(), {image.wstring(), std::wstring(program.data())}, true);
     Pause();
+}
+
+int RunRepairOperation(const std::vector<std::wstring>& args)
+{
+    if (args.empty()) return -1;
+    std::wstring command;
+    for (const auto& arg : args) {
+        if (!command.empty()) command += L' ';
+        command += QuoteProcessArgument(arg);
+    }
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process)) {
+        std::cout << "无法启动系统工具，错误代码：" << GetLastError() << "。\n";
+        return -1;
+    }
+    DWORD result = 1;
+    if (WaitForSingleObject(process.hProcess, INFINITE) == WAIT_OBJECT_0)
+        GetExitCodeProcess(process.hProcess, &result);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return static_cast<int>(result);
+}
+
+void DirectXRepairMenu()
+{
+    while (true)
+    {
+        std::cout << "\n=== DirectX 与 DLL 修复 ===\n"
+                  << "1. 检查 DLL 名称并查看建议\n"
+                  << "2. 安装微软 DirectX 旧版游戏运行库（需联网）\n"
+                  << "3. 修复 Windows 系统组件和受保护的 DLL（DISM + SFC）\n"
+                  << "4. 打开 DirectX 诊断工具\n0. 返回\n";
+        int choice = GetIntInput("请选择: ");
+        if (choice == 0 || !std::cin) return;
+        if (choice == 1)
+        {
+            std::string name = UnquotePath(GetInput("输入缺失的 DLL 文件名（例如 d3dx9_43.dll）: "));
+            std::string lower = name;
+            std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (name.empty() || name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") != std::string::npos ||
+                name.size() < 5 || lower.substr(lower.size()-4) != ".dll") {
+                std::cout << "请输入不含路径的 DLL 文件名，后缀为 .dll。\n";
+                continue;
+            }
+            wchar_t windows[MAX_PATH];
+            if (!GetWindowsDirectoryW(windows, MAX_PATH)) { std::cout << "无法读取 Windows 目录。\n"; continue; }
+            auto base = std::filesystem::path(windows);
+            auto file = Utf8Command(name);
+            std::error_code ec;
+            bool system64 = std::filesystem::is_regular_file(base / L"System32" / file, ec);
+            ec.clear();
+            bool system32 = std::filesystem::is_regular_file(base / L"SysWOW64" / file, ec);
+            std::cout << "Windows 系统目录：" << (system64 ? "已找到" : "未找到")
+                      << "；32 位兼容目录：" << (system32 ? "已找到" : "未找到") << "。\n";
+            if (lower.rfind("d3dx", 0) == 0 || lower.rfind("xinput1_3", 0) == 0 || lower.rfind("xaudio2_7", 0) == 0 || lower.rfind("xactengine", 0) == 0 ||
+                lower.rfind("d3dcompiler_43", 0) == 0 || lower.rfind("xapofx1_5", 0) == 0 || lower.rfind("x3daudio1_7", 0) == 0 || lower.rfind("d3dcsx_43", 0) == 0)
+                std::cout << "这类旧版游戏组件可尝试选项 2 安装微软 DirectX 运行库。\n";
+            else if (lower.rfind("msvcp", 0) == 0 || lower.rfind("vcruntime", 0) == 0 || lower.rfind("msvcr", 0) == 0)
+                std::cout << "这类文件通常属于 Microsoft Visual C++ 运行库，请在主菜单 5 安装对应 x86 和 x64 版本。\n";
+            else
+                std::cout << "系统 DLL 可尝试选项 3；如果文件属于某个游戏或软件，请通过其官方安装器修复或重装。\n";
+            std::cout << "检测结果只代表文件存在，不能保证完整性，也不能代表所有程序能正常使用。\n";
+            continue;
+        }
+        if (choice == 4)
+        {
+            wchar_t system[MAX_PATH];
+            DWORD size = GetSystemDirectoryW(system, MAX_PATH);
+            if (!size || size >= MAX_PATH) { std::cout << "无法获取 Windows 系统目录。\n"; continue; }
+            auto dxdiag = std::filesystem::path(system) / L"dxdiag.exe";
+            if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", dxdiag.c_str(), nullptr, nullptr, SW_SHOW)) <= 32)
+                std::cout << "无法打开 DirectX 诊断工具，请检查 Windows 组件。\n";
+            continue;
+        }
+        if (choice != 2 && choice != 3) { std::cout << "无效选项。\n"; continue; }
+        if (!IsRunAsAdmin()) { std::cout << "此操作需要管理员权限，请以管理员身份重新打开工具箱。\n"; continue; }
+        if (choice == 2)
+        {
+            if (!g_bOnlineMode) { std::cout << "当前为离线模式，无法下载运行库。\n"; continue; }
+            std::cout << "将通过 winget 安装微软官方旧版 DirectX 运行库，适用于部分旧游戏；不会升级 Windows 自带的 DirectX 版本。\n";
+            if (GetInput("输入 YES 开始安装，其他输入取消: ") != "YES") continue;
+            int result = RunRepairOperation({L"winget.exe", L"install", L"--id", L"Microsoft.DirectX", L"--exact", L"--source", L"winget", L"--installer-type", L"exe", L"--interactive", L"--force", L"--accept-package-agreements", L"--accept-source-agreements"});
+            if (result == 0) std::cout << "运行库安装程序已完成，请重新启动游戏检查。\n";
+            else if (result == 3010 || result == 1641) std::cout << "安装程序报告需要重启电脑，请重启后检查。\n";
+            else std::cout << "安装未完成，请检查 winget、网络及上方提示，诊断代码：" << result << "。\n";
+            Pause();
+            continue;
+        }
+        std::cout << "将按微软推荐顺序先修复 Windows 组件存储，再检查受保护的系统文件。操作可能耗时较长。\n";
+        std::cout << (g_bOnlineMode ? "默认使用 Windows 更新获取修复文件。\n" : "离线模式不会连接 Windows 更新；缺失修复文件时需要匹配系统版本的本地修复源。\n");
+        std::string source = UnquotePath(GetInput("已挂载的 Windows 修复源目录（可选，留空使用默认来源）: "));
+        wchar_t system[MAX_PATH];
+        DWORD size = GetSystemDirectoryW(system, MAX_PATH);
+        if (!size || size >= MAX_PATH) { std::cout << "无法获取 Windows 系统目录。\n"; continue; }
+        auto systemPath = std::filesystem::path(system);
+        std::vector<std::wstring> dism{(systemPath / L"dism.exe").wstring(), L"/Online", L"/Cleanup-Image", L"/RestoreHealth"};
+        if (!source.empty()) {
+            std::error_code ec;
+            auto path = std::filesystem::absolute(std::filesystem::u8path(source), ec);
+            if (ec || !std::filesystem::is_directory(path, ec)) { std::cout << "修复源目录不存在。\n"; continue; }
+            dism.push_back(L"/Source:" + path.wstring());
+            dism.push_back(L"/LimitAccess");
+        } else if (!g_bOnlineMode) dism.push_back(L"/LimitAccess");
+        if (GetInput("输入 YES 开始修复，其他输入取消: ") != "YES") continue;
+        std::cout << "步骤 1/2：修复 Windows 组件存储...\n";
+        int imageResult = RunRepairOperation(dism);
+        std::cout << (imageResult == 0 ? "组件存储修复命令已完成。\n" : "组件存储修复未完成；请查看上方错误和 C:\\Windows\\Logs\\DISM\\dism.log。\n");
+        std::cout << "步骤 2/2：扫描受保护的系统文件...\n";
+        int fileResult = RunRepairOperation({(systemPath / L"sfc.exe").wstring(), L"/scannow"});
+        if (fileResult == 0) std::cout << "系统文件检查已结束；是否发现或修复问题，请以上方检查结果为准。\n";
+        else std::cout << "系统文件检查未正常完成，请查看上方提示和 C:\\Windows\\Logs\\CBS\\CBS.log。\n";
+        if (imageResult != 0 || fileResult != 0) std::cout << "至少一个步骤未完成，可核对修复源版本或重启后重试。\n";
+        Pause();
+    }
+}
+
+std::string GetDiagnosticsReportScript()
+{
+    return R"PS(param(
+    [Parameter(Mandatory=$true)][ValidateSet('Battery','Sleep','Crashes','Updates','Apps')][string]$Kind,
+    [Parameter(Mandatory=$true)][ValidateNotNullOrEmpty()][string]$OutputRoot
+)
+$ErrorActionPreference = 'Stop'
+try {
+    if (-not [IO.Path]::IsPathRooted($OutputRoot)) { throw '报告目录必须为完整路径。' }
+    $directory = Join-Path $OutputRoot ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $summary = [Collections.Generic.List[string]]::new()
+    switch ($Kind) {
+        'Battery' {
+            $file = Join-Path $directory 'battery.html'
+            $detail = & "$env:SystemRoot\System32\powercfg.exe" /batteryreport /output $file 2>&1
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $file)) {
+                throw ('电池报告生成失败；请确认电脑具有受支持的电池。' + ($detail | Out-String))
+            }
+            $summary.Add('电池健康报告已生成。')
+            $summary.Add('用浏览器打开下面的 HTML，可查看设计容量、当前满充容量和电池使用记录。')
+            $summary.Add('满充容量与设计容量的差距可帮助判断损耗，仍需结合续航和设备使用年限。')
+        }
+        'Sleep' {
+            $file = Join-Path $directory 'sleep.txt'
+            $titles = @{'/a'='可用的睡眠方式';'/lastwake'='最近一次唤醒来源';'/waketimers'='定时唤醒任务';'/requests'='阻止自动睡眠的程序或设备'}
+            $summary.Add('睡眠与唤醒检查结果：')
+            foreach ($argument in @('/a','/lastwake','/waketimers','/requests')) {
+                "`r`n=== $($titles[$argument]) ===" | Out-File -LiteralPath $file -Encoding utf8 -Append
+                "`r`n=== powercfg $argument ===" | Out-File -LiteralPath $file -Encoding utf8 -Append
+                try {
+                    $detail = & "$env:SystemRoot\System32\powercfg.exe" $argument 2>&1
+                    $code = $LASTEXITCODE
+                } catch {
+                    $detail = $_.Exception.Message
+                    $code = 1
+                }
+                $detail | Out-File -LiteralPath $file -Encoding utf8 -Append
+                "Exit code: $code" | Out-File -LiteralPath $file -Encoding utf8 -Append
+                if ($code -eq 0) {
+                    $summary.Add(('  [已完成] ' + $titles[$argument]))
+                } else {
+                    $summary.Add(('  [未完成] ' + $titles[$argument] + '：当前权限或设备能力不支持，其他检查仍会继续。'))
+                }
+            }
+            $summary.Add('建议：电脑无法自动睡眠时，查看“阻止自动睡眠的程序或设备”；意外被唤醒时，查看最近唤醒来源和定时任务。')
+            $summary.Add('完整查询结果保存在报告中；本次检查没有修改电源设置。')
+        }
+        'Crashes' {
+            try {
+                $events = @(Get-WinEvent -FilterHashtable @{LogName='System';Id=41,6008,1074,1001;StartTime=(Get-Date).AddDays(-30)} -MaxEvents 500)
+            } catch {
+                if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { throw }
+                $events = @()
+            }
+            if ($events.Count -eq 0) {
+                $file = Join-Path $directory 'crashes.txt'
+                '最近 30 天没有相关系统事件。' | Set-Content -LiteralPath $file -Encoding utf8
+                $summary.Add('最近 30 天没有查到关机、重启或系统错误的相关记录。')
+            } else {
+                $file = Join-Path $directory 'crashes.csv'
+                $types = @{41='意外重启或电源中断';6008='异常关机';1074='软件或用户发起的关机/重启';1001='系统错误报告（可能含蓝屏）'}
+                $entries = @($events | Sort-Object TimeCreated -Descending | Select-Object TimeCreated,
+                    @{Name='EventType';Expression={$types[[int]$_.Id]}},Id,ProviderName,LevelDisplayName,Message)
+                $entries | Export-Csv -LiteralPath $file -NoTypeInformation -Encoding utf8
+                $summary.Add(('最近 30 天找到 ' + $entries.Count + ' 条相关记录（最多显示 500 条）。'))
+                foreach ($group in @($entries | Group-Object EventType)) {
+                    $summary.Add(('  ' + $group.Name + '：' + $group.Count + ' 条'))
+                }
+                $summary.Add('最近记录：')
+                foreach ($entry in @($entries | Select-Object -First 5)) {
+                    $summary.Add(('  ' + $entry.TimeCreated.ToString('yyyy-MM-dd HH:mm') + '  ' + $entry.EventType))
+                }
+                $summary.Add('同一次故障可能留下多条记录；“意外重启”不等于已经确认电源或硬件损坏。')
+            }
+        }
+        'Updates' {
+            $session = New-Object -ComObject Microsoft.Update.Session
+            $searcher = $session.CreateUpdateSearcher()
+            $count = [Math]::Min($searcher.GetTotalHistoryCount(), 500)
+            if ($count -eq 0) {
+                $file = Join-Path $directory 'updates.txt'
+                '没有可用的 Windows 更新历史记录。' | Set-Content -LiteralPath $file -Encoding utf8
+                $summary.Add('没有可用的 Windows 更新历史记录。')
+            } else {
+                $file = Join-Path $directory 'updates.csv'
+                $operations = @{1='安装';2='卸载';3='其他操作'}
+                $results = @{0='尚未开始';1='正在进行';2='成功';3='完成但有错误';4='失败';5='已取消'}
+                $entries = @($searcher.QueryHistory(0,$count) | ForEach-Object {
+                    $operation = $operations[[int]$_.Operation]; if (-not $operation) { $operation='未知操作' }
+                    $result = $results[[int]$_.ResultCode]; if (-not $result) { $result='未知结果' }
+                    [pscustomobject]@{Date=$_.Date;Title=$_.Title;Operation=$operation;Result=$result;
+                        OperationCode=$_.Operation;ResultCode=$_.ResultCode;HResult=$_.HResult}
+                })
+                $entries | Export-Csv -LiteralPath $file -NoTypeInformation -Encoding utf8
+                $summary.Add(('已读取最近 ' + $entries.Count + ' 条更新记录：'))
+                foreach ($group in @($entries | Group-Object Result)) {
+                    $summary.Add(('  ' + $group.Name + '：' + $group.Count + ' 条'))
+                }
+                $summary.Add('最近记录：')
+                foreach ($entry in @($entries | Sort-Object Date -Descending | Select-Object -First 5)) {
+                    $summary.Add(('  ' + $entry.Date.ToString('yyyy-MM-dd HH:mm') + '  ' + $entry.Operation + ' / ' + $entry.Result + '  ' + $entry.Title))
+                }
+                $summary.Add('这份记录用于排查更新结果；查看当前更新状态请进入 Windows 设置中的“Windows 更新”。')
+            }
+        }
+        'Apps' {
+            $rows = @(foreach ($location in @(
+                'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+                'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+                'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+            )) {
+                if (-not (Test-Path -LiteralPath $location)) { continue }
+                foreach ($key in Get-ChildItem -LiteralPath $location) {
+                    $app = Get-ItemProperty -LiteralPath $key.PSPath
+                    if (-not [string]::IsNullOrWhiteSpace($app.DisplayName)) {
+                        [pscustomobject]@{
+                            DisplayName=$app.DisplayName; DisplayVersion=$app.DisplayVersion
+                            Publisher=$app.Publisher; InstallDate=$app.InstallDate
+                            InstallLocation=$app.InstallLocation; Scope=$location
+                        }
+                    }
+                }
+            })
+            if ($rows.Count -eq 0) {
+                $file = Join-Path $directory 'apps.txt'
+                '没有可用的桌面软件安装记录。' | Set-Content -LiteralPath $file -Encoding utf8
+                $summary.Add('没有查到可用的桌面软件安装记录。')
+            } else {
+                $file = Join-Path $directory 'apps.csv'
+                $rows = @($rows | Sort-Object DisplayName,DisplayVersion,Scope -Unique)
+                $rows | Export-Csv -LiteralPath $file -NoTypeInformation -Encoding utf8
+                $summary.Add(('找到 ' + $rows.Count + ' 条桌面软件安装记录，前 10 条：'))
+                foreach ($app in @($rows | Select-Object -First 10)) {
+                    $version = [string]$app.DisplayVersion
+                    if ([string]::IsNullOrWhiteSpace($version)) { $version='未提供版本号' }
+                    $summary.Add(('  ' + $app.DisplayName + '  ' + $version))
+                }
+                $summary.Add('完整清单含名称、版本、发布者及安装位置；不包含所有商店应用或免安装软件。')
+            }
+        }
+    }
+    $summary | Set-Content -LiteralPath (Join-Path $directory 'summary.txt') -Encoding utf8
+    Write-Host ''
+    foreach ($line in $summary) { Write-Host $line }
+    Write-Host ('报告已保存: ' + $file)
+    exit 0
+} catch {
+    Write-Host ('报告生成失败: ' + $_.Exception.Message)
+    exit 1
+}
+)PS";
+}
+
+void DiagnosticsMenu()
+{
+    const std::vector<std::wstring> kinds{L"Battery", L"Sleep", L"Crashes", L"Updates", L"Apps"};
+    while (true)
+    {
+        std::cout << "\n=== 系统诊断与报告 ===\n1. 电池健康：查看容量与使用记录\n2. 睡眠与唤醒：排查睡不着、意外唤醒\n3. 重启与关机：查看近 30 天系统事件\n4. Windows 更新：查看最近安装结果\n5. 软件清单：查看名称、版本与安装位置\n6. 打开已保存的报告\n0. 返回\n";
+        int choice = GetIntInput("请选择: ");
+        if (choice == 0 || !std::cin) return;
+        if (choice < 1 || choice > 6) { std::cout << "无效选项。\n"; continue; }
+        auto directory = GetToolboxDataDirectory();
+        if (directory.empty()) { std::cout << "无法获取工具箱数据目录。\n"; continue; }
+        directory /= L"reports";
+        std::error_code error;
+        std::filesystem::create_directories(directory, error);
+        if (error) { std::cout << "无法创建报告目录。\n"; continue; }
+        if (choice == 6)
+        {
+            if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", directory.c_str(), nullptr, nullptr, SW_SHOW)) <= 32)
+                std::cout << "无法打开报告文件夹。\n";
+            continue;
+        }
+        std::cout << "正在检查，完成后会显示摘要并保存详细报告...\n";
+        if (!RunPowerShellFile(GetDiagnosticsReportScript(), {kinds[choice-1], directory.wstring()}))
+            std::cout << "未能完成报告，请查看上面的原因。\n";
+        Pause();
+    }
 }
 
 void VolumeMountMenu()

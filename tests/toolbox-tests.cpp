@@ -115,6 +115,57 @@ int main()
     }
     std::wstring path = L"C:\\Tools;C:\\Node";
     assert(PathToUtf8(std::filesystem::u8path("中文 O'Brien & path")) == "中文 O'Brien & path");
+    assert(RunRepairOperation({}) == -1);
+    assert(RunRepairOperation({L"powershell.exe", L"-NoProfile", L"-NonInteractive", L"-Command", L"exit 0"}) == 0);
+    assert(RunRepairOperation({L"powershell.exe", L"-NoProfile", L"-NonInteractive", L"-Command", L"exit 7"}) == 7);
+    assert(DescribeCommandResult("cmd /d /c exit 0", 0).find("成功") != std::string::npos);
+    for (const std::string command : {"winget install --id Example.App", "msiexec /i package.msi", "dism /online /restorehealth"})
+        for (const int code : {3010, 1641})
+            assert(DescribeCommandResult(command, code).find("重启") != std::string::npos);
+    for (const int code : {7, 3010, 1641})
+    {
+        const auto message = DescribeCommandResult("cmd /d /c exit 7", code);
+        assert(message.find("失败") != std::string::npos);
+        assert(message.find(std::to_string(code)) != std::string::npos);
+    }
+    assert(DescribeTaskState("waiting", false).find("等待") != std::string::npos);
+    assert(DescribeTaskState("running", false).find("运行") != std::string::npos);
+    assert(DescribeTaskState("done", false).find("完成") != std::string::npos);
+    assert(DescribeTaskState("failed", false).find("失败") != std::string::npos);
+    assert(DescribeTaskState("waiting", true).find("暂停") != std::string::npos);
+    assert(DescribeTaskState("running", true).find("暂停") != std::string::npos);
+    {
+        auto& queue = GetTaskQueue();
+        const bool savedEnabled = queue.enabled;
+        queue.enabled = false;
+        std::ostringstream feedback;
+        auto *savedOutput = std::cout.rdbuf(feedback.rdbuf());
+        const bool succeeded = RunCmd("cmd /d /c exit 0", false);
+        const bool failed = RunCmd("cmd /d /c exit 7", false);
+        std::cout.rdbuf(savedOutput);
+        queue.enabled = savedEnabled;
+        assert(succeeded);
+        assert(!failed);
+        assert(feedback.str().find("成功") != std::string::npos);
+        assert(feedback.str().find("失败") != std::string::npos);
+        assert(feedback.str().find("返回码:") == std::string::npos);
+    }
+    {
+        auto& queue = GetTaskQueue();
+        const bool savedEnabled = queue.enabled;
+        size_t before;
+        { std::lock_guard<std::mutex> lock(queue.mutex); before = queue.tasks.size(); }
+        queue.enabled = true;
+        std::ostringstream feedback;
+        auto *savedOutput = std::cout.rdbuf(feedback.rdbuf());
+        bool succeeded = RunCmd("cmd /d /c exit 0", false, true);
+        bool failed = RunCmd("cmd /d /c exit 7", false, true);
+        std::cout.rdbuf(savedOutput);
+        queue.enabled = savedEnabled;
+        assert(succeeded && !failed);
+        assert(feedback.str().find("失败") != std::string::npos);
+        { std::lock_guard<std::mutex> lock(queue.mutex); assert(queue.tasks.size() == before); }
+    }
     std::vector<wchar_t> selected;
     assert(ParseDriveList(" d, E:,d ", selected) && selected == std::vector<wchar_t>({L'D', L'E'}));
     for (const std::string input : {"D&whoami", "D,E,", "D,,E", "1:", "D:folder", ""})
@@ -208,6 +259,47 @@ int main()
 
     auto root = std::filesystem::current_path() / ("testdata-" + std::to_string(GetCurrentProcessId()));
     assert(std::filesystem::create_directory(root));
+    auto diagnosticsScript = root / L"diagnostics.ps1";
+    WriteFile(diagnosticsScript, std::string("\xEF\xBB\xBF") + GetDiagnosticsReportScript());
+    assert(RunPowerShellFile(R"PS(param([string]$Source)
+$ErrorActionPreference='Stop'
+$tokens=$null; $errors=$null
+$null=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+if ($errors.Count) { throw ($errors | Out-String) }
+)PS", {diagnosticsScript.wstring()}));
+    auto rejectedReport = root / L"invalid-diagnostic";
+    assert(!RunPowerShellFile(GetDiagnosticsReportScript(), {L"Unknown", rejectedReport.wstring()}));
+    assert(!std::filesystem::exists(rejectedReport));
+    auto applicationsReport = root / std::filesystem::u8path("中文 O'Brien & reports");
+    assert(RunPowerShellFile(GetDiagnosticsReportScript(), {L"Apps", applicationsReport.wstring()}));
+    assert(std::filesystem::is_directory(applicationsReport));
+    assert(RunPowerShellFile(R"PS(param([string]$Root)
+$ErrorActionPreference='Stop'
+$reports=@(Get-ChildItem -LiteralPath $Root -Recurse -File -Filter *.csv)
+if ($reports.Count -ne 1) { throw 'Expected one installed-applications CSV report' }
+$rows=@(Import-Csv -LiteralPath $reports[0].FullName)
+if (-not $rows.Count) { throw 'Installed-applications report unexpectedly empty' }
+$columns=@($rows[0].PSObject.Properties.Name)
+if ('DisplayName' -notin $columns -or 'DisplayVersion' -notin $columns) {
+    throw 'Missing installed-application names or versions'
+}
+)PS", {applicationsReport.wstring()}));
+    auto sleepReport = root / L"sleep-report";
+    assert(RunPowerShellFile(GetDiagnosticsReportScript(), {L"Sleep", sleepReport.wstring()}));
+    assert(RunPowerShellFile(R"PS(param([string]$Root)
+$ErrorActionPreference='Stop'
+$reports=@(Get-ChildItem -LiteralPath $Root -Recurse -File -Filter sleep.txt)
+if ($reports.Count -ne 1) { throw 'Expected one sleep diagnostics report' }
+$text=Get-Content -LiteralPath $reports[0].FullName -Raw
+foreach ($argument in @('/a','/lastwake','/waketimers','/requests')) {
+    if (-not $text.Contains("=== powercfg $argument ===")) {
+        throw ('Missing power configuration query: '+$argument)
+    }
+}
+if ([regex]::Matches($text,'(?m)^Exit code: \d+\r?$').Count -ne 4) {
+    throw 'Expected an exit status for every power configuration query'
+}
+)PS", {sleepReport.wstring()}));
     auto source = root / std::filesystem::u8path("中文 O'Brien & input.bin");
     auto mediaScript = root / L"iso-boot-media.ps1";
     WriteFile(mediaScript, std::string("\xEF\xBB\xBF") + GetIsoBootMediaScript());
@@ -354,7 +446,7 @@ Write-Host 'ISO media script parses; protected and ambiguous disks rejected with
     assert(!CheckJustUpdated());
     assert(GetLastVersion() == GetLocalExeHash());
 
-    for (const std::string choices : {"abc\n0\n", "0\n", ""})
+    for (const std::string choices : {"abc\n0\n", "0\n", "36\n0\n0\n", "37\n0\n0\n", ""})
     {
         std::istringstream menuInput(choices);
         std::ostringstream output;
@@ -362,6 +454,11 @@ Write-Host 'ISO media script parses; protected and ambiguous disks rejected with
         auto *oldOutput = std::cout.rdbuf(output.rdbuf());
         assert(ToolboxMain() == 0);
         assert(output.str().find("29. 进制转换工具") != std::string::npos);
+        assert(output.str().find("36. 系统诊断与报告") != std::string::npos);
+        if (choices == "36\n0\n0\n")
+            assert(output.str().find("5. 软件清单") != std::string::npos);
+        if (choices == "37\n0\n0\n")
+            assert(output.str().find("DirectX 与 DLL 修复") != std::string::npos);
         std::cout.rdbuf(oldOutput);
         std::cin.rdbuf(oldInput);
         std::cin.clear();

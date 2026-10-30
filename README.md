@@ -1,4 +1,4 @@
-# 🧰 多功能系统工具箱
+﻿# 🧰 多功能系统工具箱
 
 **简体中文** · [English](README.en.md)
 
@@ -6,11 +6,29 @@
 
 **System Toolbox** —— 免费开源的 Windows 10/11 系统维护工具箱，集成后台任务队列、高速下载、音乐转码和磁盘工具。
 
-[下载 v1.9.4 完整包](https://github.com/huvubb/system-toolbox/releases/download/v1.9.4/system-toolbox-windows.zip) · [更新说明与校验清单](https://github.com/huvubb/system-toolbox/releases/tag/v1.9.4) · [项目介绍](https://huvubb.github.io/system-toolbox/)
+[下载 v1.10.0 完整包](https://github.com/huvubb/system-toolbox/releases/download/v1.10.0/system-toolbox-windows.zip) · [更新说明与校验清单](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.0) · [项目介绍](https://huvubb.github.io/system-toolbox/)
 
 > 🇨🇳 **国内直链（免代理、更快）**：[在线介绍页](https://q23213ddssd.dpdns.org/system-toolbox/) · [ZIP 直接下载](https://q23213ddssd.dpdns.org/downloads/system-toolbox-windows.zip) · [SHA256 校验清单](https://q23213ddssd.dpdns.org/downloads/system-toolbox-SHA256SUMS.txt)（与 GitHub Release 同一文件，可用哈希核对）
 
 Open-source Windows maintenance toolbox with background queues, resumable downloads, audio conversion and volume mounts. Built with C++17/20.
+
+### v1.10.0 新增
+
+主菜单 **36 → 系统诊断与报告** 新增 5 项功能，均在本机查询并保存结果：
+
+| 选项 | 功能 | 输出 |
+|------|------|------|
+| 1 | 电池健康报告 | HTML，包括容量变化和使用记录；需要受支持的电池 |
+| 2 | 睡眠与唤醒诊断 | 支持的睡眠状态、最近唤醒、唤醒计时器和电源请求；各项错误会单独记录 |
+| 3 | 关机、重启及蓝屏事件 | 最近 30 天最多 500 条相关 System 事件，CSV |
+| 4 | Windows 更新历史 | 最近最多 500 条本机更新历史，CSV |
+| 5 | 已安装桌面软件清单 | 64 位、32 位和当前用户的安装记录，CSV |
+
+报告保存至 `%LOCALAPPDATA%\SystemToolbox\reports`，每次生成独立目录；选项 6 打开报告文件夹。无历史记录时生成说明文本。报告不会自动上传。菜单 29 的 QQ音乐旧版下载还增加了备用源，并继续校验固定 SHA256。
+
+操作结果和后台任务使用中文说明，失败时给出排查方向及诊断信息；需要依次执行的系统维护步骤会等待前一步结束。
+
+主菜单 **37 → DirectX 与 DLL 修复** 支持检查缺失的 DLL 名称，安装微软旧版 DirectX 游戏运行库，打开 DirectX 诊断工具，并依次运行 DISM 和 SFC 修复 Windows 组件及受保护的系统文件。Visual C++ 运行库可在主菜单 5 安装对应版本；第三方软件自己的 DLL 需要通过该软件的官方安装器修复。系统修复需要管理员权限，离线时可指定匹配系统版本的修复源。
 
 ### v1.9 新增
 
@@ -57,6 +75,8 @@ Open-source Windows maintenance toolbox with background queues, resumable downlo
 | 17 | NTDLL 底层 API | 系统版本 / 进程 / 时间查询及文件操作 |
 | 18 | 镜像应用 | ESD/WIM 互转、ISO 信息查看、镜像部署 |
 | 19 | NPM 工具安装 | 一键安装 AI 工具 / 构建工具 / 框架 / 数据库客户端 |
+| 36 | 系统诊断与报告 | 电池、睡眠、异常重启、更新历史、软件清单 |
+| 37 | DirectX 与 DLL 修复 | 旧版游戏运行库、系统组件与文件检查 |
 
 ---
 
@@ -64,7 +84,7 @@ Open-source Windows maintenance toolbox with background queues, resumable downlo
 
 ### 方式一：直接下载 Release（推荐）
 
-下载 [v1.9.4 完整 ZIP](https://github.com/huvubb/system-toolbox/releases/download/v1.9.4/system-toolbox-windows.zip)，解压后直接运行 `system-toolbox.exe`。音乐转换器已内置；下载器会优先使用可选 FastDL DLC，缺失时自动使用系统 curl。音乐转码另需 FFmpeg，可在工具箱内安装。
+下载 [v1.10.0 完整 ZIP](https://github.com/huvubb/system-toolbox/releases/download/v1.10.0/system-toolbox-windows.zip)，解压后直接运行 `system-toolbox.exe`。音乐转换器已内置；下载器会优先使用可选 FastDL DLC，缺失时自动使用系统 curl。音乐转码另需 FFmpeg，可在工具箱内安装。
 
 发行页附有 `SHA256SUMS.txt`，可用 PowerShell 的 `Get-FileHash .\system-toolbox.exe -Algorithm SHA256` 对照主程序哈希。
 
@@ -72,7 +92,7 @@ Open-source Windows maintenance toolbox with background queues, resumable downlo
 
 ### 方式二：通过 npm 安装
 
-Windows x64、Node.js 18+：执行 `npm install system-toolbox`，然后用 `npx system-toolbox` 启动。需要全局命令时使用 `npm install -g system-toolbox`，之后可直接运行 `system-toolbox`。从 npm 包 1.9.1 起，三个 EXE 随包提供，安装时无需另从 GitHub 或镜像下载；系统维护在启动工具箱并确认管理员权限后执行。
+Windows x64、Node.js 18+：执行 `npm install system-toolbox`，然后用 `npx system-toolbox` 启动。需要全局命令时使用 `npm install -g system-toolbox`，之后可直接运行 `system-toolbox`。原生主程序随包提供，安装时无需另从 GitHub 或镜像下载；系统维护在启动工具箱并确认管理员权限后执行。npm 版本可能晚于 GitHub 发行，请用 `npm view system-toolbox version` 确认。
 
 ### 方式三：从源码编译
 
