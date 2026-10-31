@@ -675,7 +675,6 @@ void DisktoolDlcMenu();
 void VolumeMountMenu();
 void DiagnosticsMenu();
 void DirectXRepairMenu();
-void DependencyInstallMenu();
 bool InstallPsExecToCurrentDirectory();
 bool InstallFFmpegWithPath();
 void CreateIsoBootMedia();
@@ -1010,7 +1009,6 @@ int main()
         std::cout << "35. ISO 写入磁盘并制作启动盘\n";
         std::cout << "36. 系统诊断与报告（电池/睡眠/蓝屏/更新/软件）\n";
         std::cout << "37. DirectX 与 DLL 修复\n";
-        std::cout << "38. 安装 PsExec64 / FFmpeg 并设置 PATH\n";
         std::cout << "90. 切换在线/离线模式\n";
         std::cout << " 0. 退出程序\n";
         std::cout << "========================================\n";
@@ -1073,7 +1071,6 @@ int main()
             case 35: CreateIsoBootMedia(); break;
             case 36: DiagnosticsMenu(); break;
             case 37: DirectXRepairMenu(); break;
-            case 38: DependencyInstallMenu(); break;
 
             case 90:  // 切换模式
                 ToggleMode();
@@ -7884,20 +7881,6 @@ bool InstallFFmpegWithPath()
     RefreshEnvironmentPath();
     std::cout << "FFmpeg 已就绪，当前进程和用户 PATH 已刷新；其他已打开的终端需重新打开。\n";
     return true;
-}
-
-void DependencyInstallMenu()
-{
-    while (true)
-    {
-        std::cout << "\n=== 常用工具安装 ===\n1. 安装 PsExec64 到当前目录并设置 PATH\n2. 检查/安装 FFmpeg 并设置 PATH\n0. 返回\n";
-        int choice = GetIntInput("请选择: ");
-        if (choice == 0 || !std::cin) return;
-        if (choice == 1) InstallPsExecToCurrentDirectory();
-        else if (choice == 2) InstallFFmpegWithPath();
-        else { std::cout << "无效选项。\n"; continue; }
-        Pause();
-    }
 }
 
 // 保存/读取上次运行的版本
