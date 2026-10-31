@@ -456,7 +456,7 @@ Write-Host 'ISO media script parses; protected and ambiguous disks rejected with
     assert(!CheckJustUpdated());
     assert(GetLastVersion() == GetLocalExeHash());
 
-    for (const std::string choices : {"abc\n0\n", "0\n", "36\n0\n0\n", "37\n0\n0\n", "38\n0\n0\n", ""})
+    for (const std::string choices : {"abc\n0\n", "0\n", "36\n0\n0\n", "37\n0\n0\n", ""})
     {
         std::istringstream menuInput(choices);
         std::ostringstream output;
@@ -469,8 +469,7 @@ Write-Host 'ISO media script parses; protected and ambiguous disks rejected with
             assert(output.str().find("5. 软件清单") != std::string::npos);
         if (choices == "37\n0\n0\n")
             assert(output.str().find("DirectX 与 DLL 修复") != std::string::npos);
-        if (choices == "38\n0\n0\n")
-            assert(output.str().find("安装 PsExec64 到当前目录并设置 PATH") != std::string::npos);
+        assert(output.str().find("38. 安装 PsExec64 / FFmpeg") == std::string::npos);
         std::cout.rdbuf(oldOutput);
         std::cin.rdbuf(oldInput);
         std::cin.clear();
