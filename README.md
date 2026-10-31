@@ -18,7 +18,7 @@ Open-source Windows maintenance toolbox with background queues, resumable downlo
 
 ### v1.10.1
 
-主菜单 38 可将微软签名验证通过的 PsExec64 安装到当前工作目录并加入用户 PATH，或通过 winget 安装、检查 FFmpeg 并刷新 PATH；主菜单 14 的 PsExec 安装和音视频工具的 FFmpeg 检查也可直接使用。已打开的其他终端需要重新打开。发行页提供独立 EXE 和 ZIP。
+主菜单 14 的 TrustedInstaller 操作可将微软签名验证通过的 PsExec64 安装到当前工作目录并加入用户 PATH；音视频工具可通过 winget 安装、检查 FFmpeg 并刷新 PATH。已打开的其他终端需要重新打开。发行页提供独立 EXE 和 ZIP。
 
 ### v1.10.0 新增
 
@@ -85,7 +85,6 @@ Open-source Windows maintenance toolbox with background queues, resumable downlo
 | 19 | NPM 工具安装 | 一键安装 AI 工具 / 构建工具 / 框架 / 数据库客户端 |
 | 36 | 系统诊断与报告 | 电池、睡眠、异常重启、更新历史、软件清单 |
 | 37 | DirectX 与 DLL 修复 | 旧版游戏运行库、系统组件与文件检查 |
-| 38 | 安装 PsExec64 / FFmpeg | 设置用户 PATH，并刷新工具箱环境 |
 
 ---
 
