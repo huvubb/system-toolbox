@@ -12,6 +12,10 @@
 
 Open-source Windows maintenance toolbox with background queues, resumable downloads, audio conversion and volume mounts. Built with C++17/20.
 
+### 本地功能更新
+
+在主菜单 36 中新增磁盘剩余空间（7）、开机启动项（8）和网络配置摘要（9）。每项以中文展示结果和建议，并将报告保存到工具箱数据目录；启动项包含命令和来源，网络报告含本机 IP、网关和 DNS，分享前请检查内容。仅查询，不修改启动设置或网络配置。通用操作也会区分权限不足、文件缺失和用户取消，并给出下一步建议。
+
 ### v1.10.2
 
 修复同时安装 PowerShell 7 时，PsExec64 微软签名检查可能失败的问题。

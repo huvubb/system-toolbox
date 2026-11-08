@@ -359,6 +359,13 @@ std::string DescribeCommandResult(const std::string& command, int result)
     if (IsSuccessfulCommand(command, result))
         return result == 0 ? "[成功] 操作已完成。" : "[成功] 操作已完成，需要重启电脑后生效，请先保存工作。";
     if (result == -1) return "[失败] 无法启动所需工具，请确认工具已安装且具有运行权限。";
+    const auto code = static_cast<unsigned int>(result);
+    if (code == 0x80070005u || code == 0x800702e4u)
+        return "[未完成] 当前权限不足。请以管理员身份重新打开工具箱，再重试该操作。";
+    if (code == 9009 || code == 0x80070002u)
+        return "[未完成] 找不到所需程序或文件。请检查路径，并确认相关工具已安装且已加入 PATH。";
+    if (code == 0x800704c7u || (code == 1602 && GetCommandProgram(command) == "msiexec"))
+        return "[已取消] 用户或安装程序取消了操作；如需继续，请重新运行并完成确认。";
     return "[失败] 操作未完成，请根据上方提示检查输入、路径和运行权限。（诊断代码 " + std::to_string(result) + "）";
 }
 
@@ -11835,7 +11842,8 @@ function Write-UnattendFile([string]$FilePath,[string]$PsArch) {
     $unattend = Get-BypassUnattend $PsArch
     [IO.File]::WriteAllText($FilePath, $unattend, (New-Object System.Text.UTF8Encoding($false)))
 }
-function Get-ProtectedMediaDisks {
+)PS"
+           R"PS(function Get-ProtectedMediaDisks {
     $numbers = @()
     foreach ($path in @($env:SystemRoot,$env:SystemDrive,$ToolPath,$Image,$PSCommandPath)) {
         if ([string]::IsNullOrWhiteSpace($path)) { throw '无法确定需要保护的路径。' }
@@ -11942,7 +11950,8 @@ try {
     Assert-MediaDisk $fresh @(Get-ProtectedMediaDisks)
     if ([string]$fresh.UniqueId -cne $identity -or [uint64]$fresh.Size -ne $diskSize) { throw '磁盘身份已变化，停止写入。' }
     # shortcut: 留在前台执行，避免暂停/退出后台队列使分区或写入半途终止。
-    $started = $true
+)PS"
+           R"PS(    $started = $true
     if ($fresh.PartitionStyle -ne 'RAW') {
         Clear-Disk -InputObject $fresh -RemoveData -RemoveOEM -Confirm:$false
     }
@@ -12235,7 +12244,7 @@ void DirectXRepairMenu()
 std::string GetDiagnosticsReportScript()
 {
     return R"PS(param(
-    [Parameter(Mandatory=$true)][ValidateSet('Battery','Sleep','Crashes','Updates','Apps')][string]$Kind,
+    [Parameter(Mandatory=$true)][ValidateSet('Battery','Sleep','Crashes','Updates','Apps','Storage','Startup','Network')][string]$Kind,
     [Parameter(Mandatory=$true)][ValidateNotNullOrEmpty()][string]$OutputRoot
 )
 $ErrorActionPreference = 'Stop'
@@ -12373,6 +12382,54 @@ try {
                 $summary.Add('完整清单含名称、版本、发布者及安装位置；不包含所有商店应用或免安装软件。')
             }
         }
+        'Storage' {
+            $file = Join-Path $directory 'storage.txt'
+            $disks = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Sort-Object DeviceID)
+            $summary.Add('本地磁盘空间检查：')
+            if (-not $disks.Count) { $summary.Add('没有查到可用的本地磁盘信息。') }
+            foreach ($disk in $disks) {
+                if ($null -eq $disk.Size -or [double]$disk.Size -le 0 -or $null -eq $disk.FreeSpace) {
+                    $summary.Add(('  ' + $disk.DeviceID + '：容量不可读取，可能未就绪或被锁定。'))
+                    continue
+                }
+                $percent = 100.0 * [double]$disk.FreeSpace / [double]$disk.Size
+                $state = if ($percent -lt 10) { '空间紧张，建议清理或迁移文件' } elseif ($percent -lt 20) { '剩余空间偏少，建议关注' } else { '空间充足' }
+                $summary.Add(('  {0}：剩余 {1:N1} GiB / 共 {2:N1} GiB（{3:N1}%）；{4}。' -f $disk.DeviceID,($disk.FreeSpace/1GB),($disk.Size/1GB),$percent,$state))
+            }
+            $summary.Add('提示：这里只检查剩余空间，不代表硬盘健康；没有删除任何文件。')
+            $summary | Set-Content -LiteralPath $file -Encoding utf8
+        }
+        'Startup' {
+            $file = Join-Path $directory 'startup.txt'
+            $items = @(Get-CimInstance Win32_StartupCommand | Sort-Object Name,Location)
+            $summary.Add(('查到 ' + $items.Count + ' 条开机启动记录：'))
+            foreach ($item in @($items | Select-Object -First 10)) {
+                $summary.Add(('  ' + $item.Name + '；用户：' + $item.User))
+            }
+            $summary.Add('名称不能用于判断安全性；可在任务管理器的“启动应用”中查看不需要的项目。')
+            $summary.Add('此清单不覆盖所有服务和计划任务；本次没有禁用或删除启动项。')
+            $summary | Set-Content -LiteralPath $file -Encoding utf8
+            foreach ($item in $items) {
+                @('',('名称：' + $item.Name),('启动命令：' + $item.Command),('位置：' + $item.Location),('用户：' + $item.User)) | Add-Content -LiteralPath $file -Encoding utf8
+            }
+        }
+        'Network' {
+            $file = Join-Path $directory 'network.txt'
+            $adapters = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' | Sort-Object Description)
+            $summary.Add(('查到 ' + $adapters.Count + ' 个启用 IP 的网络适配器：'))
+            foreach ($adapter in $adapters) {
+                $gateway = if (@($adapter.DefaultIPGateway).Count -and $adapter.DefaultIPGateway) { $adapter.DefaultIPGateway -join '、' } else { '未设置（本地或虚拟网络可能正常）' }
+                $dns = if ($adapter.DNSServerSearchOrder) { $adapter.DNSServerSearchOrder -join '、' } else { '未报告；如域名无法访问，请检查 DNS 设置' }
+                $summary.Add(('  网卡：' + $adapter.Description))
+                $summary.Add(('    IP 地址：' + ($adapter.IPAddress -join '、')))
+                $summary.Add(('    默认网关：' + $gateway))
+                $summary.Add(('    DNS：' + $dns))
+                $summary.Add(('    地址分配：' + $(if ($adapter.DHCPEnabled) { '自动获取（DHCP）' } else { '静态配置或由其他方式提供' })))
+            }
+            if (-not $adapters.Count) { $summary.Add('没有查到启用 IP 的适配器，请先检查网卡是否启用和网络是否连接。') }
+            $summary.Add('这是本机配置快照，不能证明可以上网；没有重置网络或发送联网探测。')
+            $summary | Set-Content -LiteralPath $file -Encoding utf8
+        }
     }
     $summary | Set-Content -LiteralPath (Join-Path $directory 'summary.txt') -Encoding utf8
     Write-Host ''
@@ -12388,13 +12445,13 @@ try {
 
 void DiagnosticsMenu()
 {
-    const std::vector<std::wstring> kinds{L"Battery", L"Sleep", L"Crashes", L"Updates", L"Apps"};
+    const std::vector<std::wstring> kinds{L"Battery", L"Sleep", L"Crashes", L"Updates", L"Apps", L"Storage", L"Startup", L"Network"};
     while (true)
     {
-        std::cout << "\n=== 系统诊断与报告 ===\n1. 电池健康：查看容量与使用记录\n2. 睡眠与唤醒：排查睡不着、意外唤醒\n3. 重启与关机：查看近 30 天系统事件\n4. Windows 更新：查看最近安装结果\n5. 软件清单：查看名称、版本与安装位置\n6. 打开已保存的报告\n0. 返回\n";
+        std::cout << "\n=== 系统诊断与报告 ===\n1. 电池健康：查看容量与使用记录\n2. 睡眠与唤醒：排查睡不着、意外唤醒\n3. 重启与关机：查看近 30 天系统事件\n4. Windows 更新：查看最近安装结果\n5. 软件清单：查看名称、版本与安装位置\n6. 打开已保存的报告\n7. 磁盘空间：查看剩余容量和清理建议\n8. 开机启动项：查看启动命令和位置\n9. 网络配置：查看 IP、网关与 DNS\n0. 返回\n";
         int choice = GetIntInput("请选择: ");
         if (choice == 0 || !std::cin) return;
-        if (choice < 1 || choice > 6) { std::cout << "无效选项。\n"; continue; }
+        if (choice < 1 || choice > 9) { std::cout << "无效选项。\n"; continue; }
         auto directory = GetToolboxDataDirectory();
         if (directory.empty()) { std::cout << "无法获取工具箱数据目录。\n"; continue; }
         directory /= L"reports";
@@ -12408,7 +12465,7 @@ void DiagnosticsMenu()
             continue;
         }
         std::cout << "正在检查，完成后会显示摘要并保存详细报告...\n";
-        if (!RunPowerShellFile(GetDiagnosticsReportScript(), {kinds[choice-1], directory.wstring()}))
+        if (!RunPowerShellFile(GetDiagnosticsReportScript(), {kinds[choice <= 5 ? choice-1 : choice-2], directory.wstring()}))
             std::cout << "未能完成报告，请查看上面的原因。\n";
         Pause();
     }
