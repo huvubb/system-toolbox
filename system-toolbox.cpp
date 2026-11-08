@@ -80,6 +80,45 @@ std::filesystem::path GetToolboxDataDirectory()
     return error ? std::filesystem::path{} : path;
 }
 
+// ==================== 卸载支持 ====================
+// 每次启动时刷新 HKCU 卸载注册表项（首次启动即完成注册），供系统“应用和功能”识别与卸载。
+void RegisterUninstallEntry()
+{
+    std::vector<wchar_t> exePath(32768);
+    DWORD length = GetModuleFileNameW(nullptr, exePath.data(), static_cast<DWORD>(exePath.size()));
+    if (!length || length >= exePath.size()) return;
+    std::wstring exe(exePath.data(), length);
+    std::wstring location = exe.substr(0, exe.find_last_of(L"\\/") + 1);
+    std::wstring uninstallString = L"\"" + exe + L"\" /uninstall";
+    std::string versionUtf8 = TOOLBOX_VERSION;
+    std::wstring version(versionUtf8.begin(), versionUtf8.end());
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\SystemToolbox",
+                        0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) return;
+    auto setValue = [&key](const wchar_t* name, const std::wstring& value) {
+        RegSetValueExW(key, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
+                       static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+    };
+    auto setDword = [&key](const wchar_t* name, DWORD value) {
+        RegSetValueExW(key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(DWORD));
+    };
+    setValue(L"DisplayName", L"多功能系统工具箱");
+    setValue(L"DisplayVersion", version);
+    setValue(L"DisplayIcon", exe);
+    setValue(L"InstallLocation", location);
+    setValue(L"UninstallString", uninstallString);
+    setValue(L"Publisher", L"huvubb");
+    setDword(L"NoModify", 1);
+    setDword(L"NoRepair", 1);
+    std::error_code fileSizeError;
+    auto exeSize = std::filesystem::file_size(exe, fileSizeError);
+    if (!fileSizeError) setDword(L"EstimatedSize", static_cast<DWORD>(exeSize / 1024));
+    RegCloseKey(key);
+}
+
+// 卸载本工具箱：删除卸载注册项、数据目录与程序自身。返回 true 表示已确认卸载，调用方应退出程序。
+bool UninstallToolbox();
+
 // 控制台代码页设置为 UTF-8
 void SetUtf8Console()
 {
@@ -907,6 +946,28 @@ int main()
 {
     SetUtf8Console();
 
+    // 命令行卸载入口（供系统“应用和功能”的 UninstallString 调用）
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv)
+        {
+            for (int i = 1; i < argc; ++i)
+            {
+                if (_wcsicmp(argv[i], L"/uninstall") == 0)
+                {
+                    LocalFree(argv);
+                    if (UninstallToolbox()) return 0;
+                    break;
+                }
+            }
+            LocalFree(argv);
+        }
+    }
+
+    // 注册/刷新卸载信息（首次启动即写入，供系统识别与卸载）
+    RegisterUninstallEntry();
+
     // PE/RE 自动检测
     if (IsInPeOrRe())
     {
@@ -1006,10 +1067,11 @@ int main()
         std::cout << "32. fastdl 高速下载器\n";
         std::cout << "33. DiskTool DLC\n";
         std::cout << "34. 卷与镜像挂载管理\n";
-        std::cout << "35. ISO 写入磁盘并制作启动盘\n";
+        std::cout << "35. ISO 写入磁盘制作启动盘 / Windows To Go\n";
         std::cout << "36. 系统诊断与报告（电池/睡眠/蓝屏/更新/软件）\n";
         std::cout << "37. DirectX 与 DLL 修复\n";
         std::cout << "90. 切换在线/离线模式\n";
+        std::cout << "91. 卸载本工具箱\n";
         std::cout << " 0. 退出程序\n";
         std::cout << "========================================\n";
         choice = GetIntInput("请输入选项: ");
@@ -1074,6 +1136,10 @@ int main()
 
             case 90:  // 切换模式
                 ToggleMode();
+                break;
+
+            case 91:  // 卸载本工具箱
+                if (UninstallToolbox()) return 0;
                 break;
 
             case 0:
@@ -11698,7 +11764,7 @@ bool IsProtectedMountPoint(const std::wstring& mount)
 
 std::string GetIsoBootMediaScript()
 {
-    return R"PS(param([string]$Image,[string]$ToolPath,[switch]$FunctionsOnly)
+    return R"PS(param([string]$Image,[string]$ToolPath,[string]$Mode='Setup',[string]$PatchBypass='0')
 $ErrorActionPreference='Stop'
 function Assert-MediaDisk($Disk,$ProtectedNumbers) {
     if ($null -eq $Disk -or $Disk.IsBoot -or $Disk.IsSystem -or $Disk.IsOffline -or
@@ -11707,6 +11773,67 @@ function Assert-MediaDisk($Disk,$ProtectedNumbers) {
         [string]::IsNullOrWhiteSpace([string]$Disk.UniqueId) -or $Disk.Size -lt 4GB -or $Disk.Size -gt 2TB) {
         throw '目标磁盘不可写、身份不明确、受保护或属于不支持的虚拟存储。'
     }
+}
+function Get-BypassUnattend([string]$PsArch) {
+    $archMap = @{ '9'='amd64'; '12'='arm64'; '6'='ia64'; '0'='x86' }
+    $arch = if ($archMap.ContainsKey($PsArch)) { $archMap[$PsArch] } else { 'amd64' }
+    $bypassCmds = @(
+        'reg add HKLM\SYSTEM\Setup\LabConfig /v BypassTPMCheck /t REG_DWORD /d 1 /f',
+        'reg add HKLM\SYSTEM\Setup\LabConfig /v BypassSecureBootCheck /t REG_DWORD /d 1 /f',
+        'reg add HKLM\SYSTEM\Setup\LabConfig /v BypassRAMCheck /t REG_DWORD /d 1 /f',
+        'reg add HKLM\SYSTEM\Setup\LabConfig /v BypassCPUCheck /t REG_DWORD /d 1 /f',
+        'reg add HKLM\SYSTEM\Setup\LabConfig /v BypassStorageCheck /t REG_DWORD /d 1 /f',
+        'reg add HKLM\SYSTEM\Setup\LabConfig /v BypassDiskCheck /t REG_DWORD /d 1 /f'
+    )
+    $order = 0
+    $commands = ($bypassCmds | ForEach-Object {
+        $order++
+        '            <RunSynchronousCommand wcm:action="add">' + "`r`n" +
+        '              <Order>' + $order + '</Order>' + "`r`n" +
+        '              <Path>' + $_ + '</Path>' + "`r`n" +
+        '            </RunSynchronousCommand>'
+    }) -join "`r`n"
+    return '<?xml version="1.0" encoding="utf-8"?>' + "`r`n" +
+        '<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">' + "`r`n" +
+        '  <settings pass="windowsPE">' + "`r`n" +
+        '    <component name="Microsoft-Windows-Setup" processorArchitecture="' + $arch + '" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">' + "`r`n" +
+        '      <RunSynchronous>' + "`r`n" + $commands + "`r`n" + '      </RunSynchronous>' + "`r`n" +
+        '    </component>' + "`r`n" +
+        '  </settings>' + "`r`n" +
+        '  <settings pass="oobeSystem">' + "`r`n" +
+        '    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="' + $arch + '" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">' + "`r`n" +
+        '      <OOBE>' + "`r`n" +
+        '        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>' + "`r`n" +
+        '        <ProtectYourPC>3</ProtectYourPC>' + "`r`n" +
+        '      </OOBE>' + "`r`n" +
+        '    </component>' + "`r`n" +
+        '  </settings>' + "`r`n" +
+        '</unattend>'
+}
+function Set-OfflineBypass([string]$WindowsDir) {
+    $software = Join-Path $WindowsDir 'System32\config\SOFTWARE'
+    $system = Join-Path $WindowsDir 'System32\config\SYSTEM'
+    foreach ($hive in @($software,$system)) {
+        if (-not (Test-Path -LiteralPath $hive)) { throw "缺少注册表配置单元: $hive" }
+    }
+    reg load 'HKLM\STB_SOFTWARE' "$software" | Out-Null
+    try {
+        New-Item -Path 'HKLM:\STB_SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE' -Force -ErrorAction SilentlyContinue | Out-Null
+        New-ItemProperty -Path 'HKLM:\STB_SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE' -Name BypassNRO -Value 1 -PropertyType DWord -Force | Out-Null
+    } finally { [void](reg unload 'HKLM\STB_SOFTWARE') }
+    reg load 'HKLM\STB_SYSTEM' "$system" | Out-Null
+    try {
+        New-Item -Path 'HKLM:\STB_SYSTEM\Setup\LabConfig' -Force -ErrorAction SilentlyContinue | Out-Null
+        foreach ($name in @('BypassTPMCheck','BypassSecureBootCheck','BypassRAMCheck','BypassCPUCheck','BypassStorageCheck','BypassDiskCheck')) {
+            New-ItemProperty -Path 'HKLM:\STB_SYSTEM\Setup\LabConfig' -Name $name -Value 1 -PropertyType DWord -Force | Out-Null
+        }
+        New-Item -Path 'HKLM:\STB_SYSTEM\Setup\MoSetup' -Force -ErrorAction SilentlyContinue | Out-Null
+        New-ItemProperty -Path 'HKLM:\STB_SYSTEM\Setup\MoSetup' -Name AllowUpgradesWithUnsupportedTPMOrCPU -Value 1 -PropertyType DWord -Force | Out-Null
+    } finally { [void](reg unload 'HKLM\STB_SYSTEM') }
+}
+function Write-UnattendFile([string]$FilePath,[string]$PsArch) {
+    $unattend = Get-BypassUnattend $PsArch
+    [IO.File]::WriteAllText($FilePath, $unattend, (New-Object System.Text.UTF8Encoding($false)))
 }
 function Get-ProtectedMediaDisks {
     $numbers = @()
@@ -11729,7 +11856,6 @@ function Get-ProtectedMediaDisks {
     }
     return @($numbers | Sort-Object -Unique)
 }
-if ($FunctionsOnly) { return }
 $mountedHere = $false
 $started = $false
 try {
@@ -11751,16 +11877,34 @@ try {
         -not (Test-Path -LiteralPath ($source+'bootmgr'))) { throw '当前仅支持 Windows 安装/WinPE ISO。' }
     $efi = @(Get-ChildItem -LiteralPath ($source+'efi\boot') -Filter 'boot*.efi' -File)
     if ($efi.Count -eq 0) { throw '镜像缺少 UEFI 启动文件。' }
-    $files = @(Get-ChildItem -LiteralPath $source -File -Recurse -Force)
-    $large = @($files | Where-Object Length -gt 4294967295)
-    foreach ($file in $large) {
-        if ($file.FullName -ine ($source+'sources\install.wim')) { throw "FAT32 无法容纳此大文件: $($file.FullName)" }
+    $wtg = $Mode -ieq 'WTG'
+    $installPath = $null
+    $imageIndex = 1
+    if ($wtg) {
+        $installRel = @('sources\install.wim','sources\install.esd') | Where-Object { Test-Path -LiteralPath ($source+$_) } | Select-Object -First 1
+        if (-not $installRel) { throw '镜像缺少 install.wim/install.esd，无法制作 Windows To Go。' }
+        $installPath = $source + $installRel
+        $images = @(Get-WindowsImage -ImagePath $installPath)
+        if ($images.Count -eq 0) { throw '无法读取可安装的系统映像。' }
+        $images | Select-Object Index,ImageName,@{n='GB';e={[math]::Round($_.ImageSize/1GB,1)}} | Format-Table -AutoSize | Out-Host
+        $indexInput = Read-Host '要安装的系统映像序号（默认 1）'
+        if ($indexInput -eq '') { $indexInput = '1' }
+        if ($indexInput -notmatch '^\d+$') { throw '映像序号无效。' }
+        $chosen = $images | Where-Object { [int]$_.Index -eq [int]$indexInput }
+        if (-not $chosen) { throw '映像序号不存在。' }
+        $imageIndex = [int]$indexInput
+    } else {
+        $files = @(Get-ChildItem -LiteralPath $source -File -Recurse -Force)
+        $large = @($files | Where-Object Length -gt 4294967295)
+        foreach ($file in $large) {
+            if ($file.FullName -ine ($source+'sources\install.wim')) { throw "FAT32 无法容纳此大文件: $($file.FullName)" }
+        }
+        $split = $large.Count -ne 0
+        if ($split -and (Test-Path -LiteralPath ($source+'sources\install.swm'))) { throw '镜像同时包含 WIM 与 SWM，停止以免混合安装映像。' }
+        if ($split) { $null = Get-Command Split-WindowsImage -ErrorAction Stop }
+        $required = [uint64](($files | Measure-Object Length -Sum).Sum + 512MB)
+        if ($required -gt 30GB) { throw '镜像展开后超过本功能的 30GB 启动分区上限。' }
     }
-    $split = $large.Count -ne 0
-    if ($split -and (Test-Path -LiteralPath ($source+'sources\install.swm'))) { throw '镜像同时包含 WIM 与 SWM，停止以免混合安装映像。' }
-    if ($split) { $null = Get-Command Split-WindowsImage -ErrorAction Stop }
-    $required = [uint64](($files | Measure-Object Length -Sum).Sum + 512MB)
-    if ($required -gt 30GB) { throw '镜像展开后超过本功能的 30GB 启动分区上限。' }
     $protected = @(Get-ProtectedMediaDisks)
     Get-Disk | Select-Object Number,FriendlyName,SerialNumber,BusType,@{n='GiB';e={[math]::Round($_.Size/1GB,2)}},IsBoot,IsSystem | Format-Table -AutoSize | Out-Host
     $inputNumber = Read-Host '目标物理磁盘编号（留空取消；整盘所有分区和数据将被清除）'
@@ -11770,7 +11914,10 @@ try {
     Assert-MediaDisk $disk $protected
     $identity = [string]$disk.UniqueId
     $diskSize = [uint64]$disk.Size
-    if ($diskSize -lt ($required+2MB)) { throw '磁盘空间不足。' }
+    if ($wtg) {
+        $chosenImage = Get-WindowsImage -ImagePath $installPath -Index $imageIndex
+        if ([uint64]$diskSize -lt ([uint64]$chosenImage.ImageSize + 2GB)) { throw '目标磁盘空间不足以安装该系统映像。' }
+    } elseif ($diskSize -lt ($required+2MB)) { throw '磁盘空间不足。' }
     $mode = Read-Host '启动模式：1=UEFI（默认），2=UEFI+传统 BIOS'
     if ($mode -notin @('','1','2')) { throw '启动模式无效。' }
     $legacy = $mode -eq '2'
@@ -11784,7 +11931,11 @@ try {
     }
     $disk | Format-List Number,FriendlyName,SerialNumber,UniqueId,Size,BusType | Out-Host
     Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | Select-Object PartitionNumber,DriveLetter,Size,Type | Format-Table | Out-Host
-    Write-Host '警告：将清除以上物理磁盘的全部分区和数据，创建最大 30GB 的 MBR/FAT32 启动分区；剩余空间保持未分配。' -ForegroundColor Yellow
+    if ($wtg) {
+        Write-Host '警告：将清除以上物理磁盘的全部分区和数据，整个磁盘将安装为 Windows To Go 便携系统。' -ForegroundColor Yellow
+    } else {
+        Write-Host '警告：将清除以上物理磁盘的全部分区和数据，创建最大 30GB 的 MBR/FAT32 启动分区；剩余空间保持未分配。' -ForegroundColor Yellow
+    }
     $confirmation = 'ERASE '+$disk.Number+' '+$identity
     if ((Read-Host "确认请输入完整内容：$confirmation") -cne $confirmation) { Write-Host '已取消。'; return }
     $fresh = Get-Disk -Number $disk.Number
@@ -11795,31 +11946,77 @@ try {
     if ($fresh.PartitionStyle -ne 'RAW') {
         Clear-Disk -InputObject $fresh -RemoveData -RemoveOEM -Confirm:$false
     }
-    $fresh = Initialize-Disk -InputObject $fresh -PartitionStyle MBR -PassThru
-    $partitionSize = [uint64][math]::Min(30GB,([math]::Floor(($diskSize-2MB)/1MB)*1MB))
-    $partition = New-Partition -InputObject $fresh -Size $partitionSize -AssignDriveLetter -IsActive
-    $volume = $partition | Format-Volume -FileSystem FAT32 -NewFileSystemLabel 'WINSETUP' -Force -Confirm:$false
-    if (-not $volume.DriveLetter) { throw '新分区没有可用盘符。' }
-    $target = "$($volume.DriveLetter):\"
-    if ([uint64]$volume.SizeRemaining -lt $required) { throw '格式化后的可用空间不足。' }
-    $copyArgs = @($source,$target,'/E','/COPY:DAT','/DCOPY:T','/R:1','/W:1','/XJ','/NP')
-    if ($split) { $copyArgs += @('/XF',($source+'sources\install.wim')) }
-    & "$env:SystemRoot\System32\robocopy.exe" @copyArgs
-    if ($LASTEXITCODE -ge 8) { throw "复制文件失败: $LASTEXITCODE" }
-    if ($split) {
-        Split-WindowsImage -ImagePath ($source+'sources\install.wim') -SplitImagePath ($target+'sources\install.swm') -FileSize 3800 -CheckIntegrity | Out-Host
+    $partStyle = 'MBR'
+    if ($wtg -and -not $legacy) { $partStyle = 'GPT' }
+    $fresh = Initialize-Disk -InputObject $fresh -PartitionStyle $partStyle -PassThru
+    if ($wtg) {
+        if ($legacy) {
+            $partition = New-Partition -InputObject $fresh -UseMaximumSize -AssignDriveLetter -IsActive
+            $volume = $partition | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'WTG' -Force -Confirm:$false
+        } else {
+            $esp = New-Partition -InputObject $fresh -Size 300MB -AssignDriveLetter -GptType '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
+            $null = $esp | Format-Volume -FileSystem FAT32 -NewFileSystemLabel 'SYSTEM' -Force -Confirm:$false
+            $main = New-Partition -InputObject $fresh -UseMaximumSize -AssignDriveLetter
+            $volume = $main | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'WTG' -Force -Confirm:$false
+        }
+        if (-not $volume.DriveLetter) { throw '新分区没有可用盘符。' }
+        $target = "$($volume.DriveLetter):\"
+        Write-Host "正在把 Windows 映像应用到 $target ，可能需要数分钟到半小时以上（取决于磁盘速度），请勿中断..."
+        Expand-WindowsImage -ImagePath $installPath -ApplyIndex $imageIndex -ApplyPath $target | Out-Null
+        $bcdboot = Join-Path $env:SystemRoot 'System32\bcdboot.exe'
+        if ($legacy) {
+            & $bcdboot "$target\Windows" /s "$target" /f BIOS
+            if ($LASTEXITCODE -ne 0) { throw 'bcdboot 写入 BIOS 启动文件失败。' }
+            & $bootsect /nt60 "$target" /mbr
+            if ($LASTEXITCODE -ne 0) { throw "写入 BIOS 启动代码失败: $LASTEXITCODE" }
+        } else {
+            $espLetter = "$($esp.DriveLetter):"
+            & $bcdboot "$target\Windows" /s $espLetter /f UEFI
+            if ($LASTEXITCODE -ne 0) { throw 'bcdboot 写入 UEFI 启动文件失败。' }
+        }
+        if ($PatchBypass -eq '1') {
+            Write-Host '正在写入离线绕过配置（TPM/安全启动/内存检查 + 跳过微软联网账户）...'
+            Set-OfflineBypass "$target\Windows"
+            $arch = [string](Get-WindowsImage -ImagePath $installPath -Index $imageIndex).Architecture
+            $panther = Join-Path $target 'Windows\Panther'
+            New-Item -ItemType Directory -Path $panther -Force | Out-Null
+            Write-UnattendFile (Join-Path $panther 'unattend.xml') $arch
+        }
+        Write-Host "Windows To Go 制作完成：$target；请安全弹出后从固件启动菜单选择此磁盘。" -ForegroundColor Green
+        if ($PatchBypass -eq '1') {
+            Write-Host '若首次启动进入 OOBE 仍被强制要求微软账户：按 Shift+F10 打开命令提示符，输入 start ms-cxh:localonly 可直接创建本地账户（Windows 11 24H2 及以上有效）。' -ForegroundColor Yellow
+        }
+    } else {
+        $partitionSize = [uint64][math]::Min(30GB,([math]::Floor(($diskSize-2MB)/1MB)*1MB))
+        $partition = New-Partition -InputObject $fresh -Size $partitionSize -AssignDriveLetter -IsActive
+        $volume = $partition | Format-Volume -FileSystem FAT32 -NewFileSystemLabel 'WINSETUP' -Force -Confirm:$false
+        if (-not $volume.DriveLetter) { throw '新分区没有可用盘符。' }
+        $target = "$($volume.DriveLetter):\"
+        if ([uint64]$volume.SizeRemaining -lt $required) { throw '格式化后的可用空间不足。' }
+        $copyArgs = @($source,$target,'/E','/COPY:DAT','/DCOPY:T','/R:1','/W:1','/XJ','/NP')
+        if ($split) { $copyArgs += @('/XF',($source+'sources\install.wim')) }
+        & "$env:SystemRoot\System32\robocopy.exe" @copyArgs
+        if ($LASTEXITCODE -ge 8) { throw "复制文件失败: $LASTEXITCODE" }
+        if ($split) {
+            Split-WindowsImage -ImagePath ($source+'sources\install.wim') -SplitImagePath ($target+'sources\install.swm') -FileSize 3800 -CheckIntegrity | Out-Host
+        }
+        if ($legacy) {
+            & $bootsect /nt60 "$($volume.DriveLetter):" /mbr
+            if ($LASTEXITCODE -ne 0) { throw "写入 BIOS 启动代码失败: $LASTEXITCODE" }
+        }
+        foreach ($file in $files) {
+            if ($split -and $file.FullName -ieq ($source+'sources\install.wim')) { continue }
+            $written = Get-Item -LiteralPath (Join-Path $target $file.FullName.Substring($source.Length))
+            if ($written.Length -ne $file.Length) { throw "复制后的文件大小不符: $($file.FullName)" }
+        }
+        if ($split -and @(Get-ChildItem -LiteralPath ($target+'sources') -Filter 'install*.swm' -File).Count -eq 0) { throw '缺少分卷安装文件。' }
+        if ($PatchBypass -eq '1') {
+            Write-Host '正在写入安装介质绕过配置（TPM/安全启动/内存检查 + 跳过微软联网账户）...'
+            $bootArch = [string](Get-WindowsImage -ImagePath ($source+'sources\boot.wim') -Index 1).Architecture
+            Write-UnattendFile ($target+'unattend.xml') $bootArch
+        }
+        Write-Host "制作完成：$target；启动文件已写入，请安全弹出后从固件启动菜单选择此磁盘。" -ForegroundColor Green
     }
-    if ($legacy) {
-        & $bootsect /nt60 "$($volume.DriveLetter):" /mbr
-        if ($LASTEXITCODE -ne 0) { throw "写入 BIOS 启动代码失败: $LASTEXITCODE" }
-    }
-    foreach ($file in $files) {
-        if ($split -and $file.FullName -ieq ($source+'sources\install.wim')) { continue }
-        $written = Get-Item -LiteralPath (Join-Path $target $file.FullName.Substring($source.Length))
-        if ($written.Length -ne $file.Length) { throw "复制后的文件大小不符: $($file.FullName)" }
-    }
-    if ($split -and @(Get-ChildItem -LiteralPath ($target+'sources') -Filter 'install*.swm' -File).Count -eq 0) { throw '缺少分卷安装文件。' }
-    Write-Host "制作完成：$target；启动文件已写入，请安全弹出后从固件启动菜单选择此磁盘。" -ForegroundColor Green
 } catch {
     Write-Host $_ -ForegroundColor Red
     if ($started) { Write-Host '目标盘可能处于部分完成状态，请重新制作；数据清除不能自动回滚。' }
@@ -11828,6 +12025,64 @@ try {
     if ($mountedHere) { Dismount-DiskImage -ImagePath $Image -ErrorAction Continue | Out-Null }
 }
 )PS";
+}
+
+// 卸载本工具箱：删除卸载注册项、数据目录与程序自身。返回 true 表示已确认卸载，调用方应退出程序。
+bool UninstallToolbox()
+{
+    ClearScreen();
+    std::cout << "========== 卸载多功能系统工具箱 ==========\n";
+    {
+        auto& queue = GetTaskQueue();
+        std::lock_guard<std::mutex> lock(queue.mutex);
+        for (const auto& task : queue.tasks)
+            if (task->state == "running" || task->state == "waiting")
+            {
+                std::cout << "有后台任务正在进行，请先在主菜单 31 结束它们，再执行卸载。\n";
+                Pause();
+                return false;
+            }
+    }
+    std::vector<wchar_t> exeBuffer(32768);
+    DWORD length = GetModuleFileNameW(nullptr, exeBuffer.data(), static_cast<DWORD>(exeBuffer.size()));
+    if (!length || length >= exeBuffer.size()) { std::cout << "无法确认程序自身路径，已取消。\n"; Pause(); return false; }
+    std::filesystem::path exe(exeBuffer.data());
+    std::vector<wchar_t> appData(32768);
+    DWORD appDataLength = GetEnvironmentVariableW(L"LOCALAPPDATA", appData.data(), static_cast<DWORD>(appData.size()));
+    std::filesystem::path dataDirectory;
+    if (appDataLength && appDataLength < appData.size()) dataDirectory = std::filesystem::path(appData.data()) / L"SystemToolbox";
+    std::cout << "程序位置: " << PathToUtf8(exe) << "\n";
+    if (!dataDirectory.empty()) std::cout << "数据目录: " << PathToUtf8(dataDirectory) << "\n";
+    std::cout << "\n将删除以下内容：\n"
+              << "  1. 卸载注册表项（HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\SystemToolbox）\n"
+              << "  2. 数据目录（含 DLC、报告、下载缓存等）\n"
+              << "  3. 程序自身 EXE 文件\n"
+              << "不会删除您另存到其他位置的文件；已修改的系统设置（休眠、服务、用户 PATH 等）不会自动还原。\n";
+    std::string confirm = GetInput("确认卸载请输入 UNINSTALL（其他输入取消）: ");
+    if (confirm != "UNINSTALL") { std::cout << "已取消。\n"; Pause(); return false; }
+    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\SystemToolbox");
+    std::cout << "[1/3] 卸载注册表项已删除。\n";
+    std::error_code error;
+    bool dataRemoved = false;
+    if (!dataDirectory.empty())
+        dataRemoved = std::filesystem::remove_all(dataDirectory, error) > 0 && !error;
+    std::cout << (dataRemoved ? "[2/3] 数据目录已删除。\n" : "[2/3] 数据目录不存在或已清空。\n");
+    std::wstring command = L"cmd.exe /c ping -n 3 127.0.0.1 > nul & del /f /q \"" + exe.wstring() + L"\"";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION process{};
+    bool deleteScheduled = CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process);
+    if (deleteScheduled)
+    {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+    std::cout << (deleteScheduled ? "[3/3] 程序文件将在退出后自动删除。\n卸载完成，程序即将退出。\n"
+                                  : "[3/3] 无法计划自动删除，请退出后手动删除程序文件。\n卸载完成，程序即将退出。\n");
+    Pause();
+    return true;
 }
 
 void CreateIsoBootMedia()
@@ -11848,10 +12103,16 @@ void CreateIsoBootMedia()
     std::error_code error;
     auto image = std::filesystem::absolute(std::filesystem::u8path(value), error);
     if (error || !std::filesystem::is_regular_file(image, error)) { std::cout << "镜像文件不存在。\n"; Pause(); return; }
+    std::cout << "制作模式：1=普通安装启动盘（默认），2=Windows To Go 整盘便携系统\n";
+    std::string modeChoice = GetInput("请选择: ");
+    bool wtg = modeChoice == "2";
+    std::string patch;
+    if (GetInput("是否移除 TPM 2.0/安全启动/内存检查并跳过微软联网账户要求（输入 Y 启用，其余跳过）: ") == "Y") patch = "1";
     std::vector<wchar_t> program(32768);
     DWORD size = GetModuleFileNameW(nullptr, program.data(), static_cast<DWORD>(program.size()));
     if (!size || size >= program.size()) { std::cout << "无法确认工具箱所在路径。\n"; return; }
-    RunPowerShellFile(GetIsoBootMediaScript(), {image.wstring(), std::wstring(program.data())}, true);
+    RunPowerShellFile(GetIsoBootMediaScript(), {image.wstring(), std::wstring(program.data()),
+        wtg ? std::wstring(L"WTG") : std::wstring(L"Setup"), std::wstring(patch.begin(), patch.end())}, true);
     Pause();
 }
 

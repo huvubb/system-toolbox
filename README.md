@@ -6,7 +6,7 @@
 
 **System Toolbox** —— 免费开源的 Windows 10/11 系统维护工具箱，集成后台任务队列、高速下载、音乐转码和磁盘工具。
 
-[下载 v1.10.2 ZIP](https://github.com/huvubb/system-toolbox/releases/download/v1.10.2/system-toolbox-windows-menu-fix.zip) · [下载独立 EXE](https://github.com/huvubb/system-toolbox/releases/download/v1.10.2/system-toolbox-menu-fix.exe) · [更新说明与校验清单](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.2) · [项目介绍](https://huvubb.github.io/system-toolbox/)
+[下载 v1.10.2 ZIP](https://github.com/huvubb/system-toolbox/releases/download/v1.10.2/system-toolbox-windows.zip) · [下载独立 EXE](https://github.com/huvubb/system-toolbox/releases/download/v1.10.2/system-toolbox.exe) · [更新说明与校验清单](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.2) · [项目介绍](https://huvubb.github.io/system-toolbox/)
 
 > 🇨🇳 **国内直链（免代理、更快）**：[在线介绍页](https://q23213ddssd.dpdns.org/system-toolbox/) · [ZIP 直接下载](https://q23213ddssd.dpdns.org/downloads/system-toolbox-windows.zip) · [SHA256 校验清单](https://q23213ddssd.dpdns.org/downloads/system-toolbox-SHA256SUMS.txt)（与 GitHub Release 同一文件，可用哈希核对）
 
@@ -85,6 +85,9 @@ Open-source Windows maintenance toolbox with background queues, resumable downlo
 | 19 | NPM 工具安装 | 一键安装 AI 工具 / 构建工具 / 框架 / 数据库客户端 |
 | 36 | 系统诊断与报告 | 电池、睡眠、异常重启、更新历史、软件清单 |
 | 37 | DirectX 与 DLL 修复 | 旧版游戏运行库、系统组件与文件检查 |
+| 91 | 卸载本工具箱 | 删除卸载注册项、数据目录与程序自身 |
+
+程序首次启动时会在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\SystemToolbox` 写入卸载注册信息，可在系统“设置 → 应用 → 安装的应用”中看到并直接卸载（调用 `system-toolbox.exe /uninstall`）；主菜单 91 提供同样的卸载流程。卸载会删除该注册表项、`%LOCALAPPDATA%\SystemToolbox` 数据目录（含 DLC、报告、下载缓存）与程序 EXE 文件本身，需输入 `UNINSTALL` 确认；不会删除用户另存的文件，已修改的系统设置（休眠、服务、用户 PATH 等）不会自动还原。
 
 ---
 
@@ -92,7 +95,7 @@ Open-source Windows maintenance toolbox with background queues, resumable downlo
 
 ### 方式一：直接下载 Release（推荐）
 
-下载 [v1.10.2 ZIP](https://github.com/huvubb/system-toolbox/releases/download/v1.10.2/system-toolbox-windows-menu-fix.zip) 解压后运行 `system-toolbox.exe`，或下载[独立 EXE](https://github.com/huvubb/system-toolbox/releases/download/v1.10.2/system-toolbox-menu-fix.exe) 直接运行。音乐转换器已内置；下载器会优先使用可选 FastDL DLC，缺失时自动使用系统 curl。音乐转码另需 FFmpeg，可在工具箱内安装。
+下载 [v1.10.2 ZIP](https://github.com/huvubb/system-toolbox/releases/download/v1.10.2/system-toolbox-windows.zip) 解压后运行 `system-toolbox.exe`，或下载[独立 EXE](https://github.com/huvubb/system-toolbox/releases/download/v1.10.2/system-toolbox.exe) 直接运行。音乐转换器已内置；下载器会优先使用可选 FastDL DLC，缺失时自动使用系统 curl。音乐转码另需 FFmpeg，可在工具箱内安装。
 
 发行页附有 `SHA256SUMS.txt`，可用 PowerShell 的 `Get-FileHash .\system-toolbox.exe -Algorithm SHA256` 对照主程序哈希。
 
@@ -164,6 +167,10 @@ FastDL 作为可选 DLC 下载；没有 DLC 时下载功能自动使用系统 cu
 ### DiskTool DLC、挂载与磁盘检查
 
 主菜单 **35** 可将 Windows 安装/WinPE ISO 制作为磁盘启动介质：清除所选物理磁盘，创建最大 30GB 的 MBR/FAT32 活动分区，复制安装文件与 EFI 启动文件；超过 4GB 的 `sources/install.wim` 自动分卷。可选 UEFI+BIOS 模式会使用通过微软签名校验的 `bootsect.exe` 写入目标卷启动代码。需要管理员权限，目标盘容量须为 4GB–2TB；ISO 必须包含 Windows/WinPE 启动文件，本功能不支持 Linux ISO 或光盘刻录。大于 30GB 的剩余磁盘空间保持未分配。
+
+主菜单 35 也可选择 **Windows To Go 模式**：清除目标盘后把整个磁盘安装为可携带的完整 Windows（从 ISO 内的 `install.wim/install.esd` 选择系统映像并直接应用，不受 30GB 上限限制，支持 64GB 等整盘使用）。UEFI 模式创建 GPT 分区布局（300MB EFI 系统分区 + 其余 NTFS 系统分区），UEFI+传统 BIOS 模式创建 MBR 单 NTFS 活动分区并写入 BIOS 启动代码。制作完成后通过固件启动菜单从该盘启动，可插入任意电脑使用（性能取决于 USB 介质速度）。
+
+两种模式均可选**绕过安装限制**：普通启动盘在介质根目录写入 `unattend.xml`（windowsPE 阶段注入 `LabConfig` 绕过键，OOBE 阶段隐藏在线账户页）；Windows To Go 直接加载目标系统离线注册表，写入 `BypassNRO`、`LabConfig`（BypassTPMCheck/BypassSecureBootCheck/BypassRAMCheck 等）与 `MoSetup\AllowUpgradesWithUnsupportedTPMOrCPU`，并在 `Windows\Panther` 放置 OOBE 应答文件，用于移除 TPM 2.0、安全启动、内存等硬件检查并跳过微软联网账户强制要求。Windows 11 24H2 及以上版本若 OOBE 仍强制登录微软账户，可在 OOBE 界面按 Shift+F10 打开命令提示符并运行 `start ms-cxh:localonly` 创建本地账户。
 
 制作启动盘会清除目标盘所有分区和数据，不能自动回滚。程序显示编号、型号、序列号、容量与分区，并要求输入包含磁盘唯一标识的确认文本；拦截系统、启动、分页文件、ISO、工具箱和临时脚本所在盘，执行前再次校验磁盘身份。制作流程固定在前台，勿在写入期间拔盘或关闭程序；首次使用前请备份。完成后应安全弹出并通过固件启动菜单验证，UEFI/BIOS 是否可启动仍取决于镜像架构与目标固件。
 
