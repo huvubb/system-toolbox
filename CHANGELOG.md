@@ -1,6 +1,30 @@
 # 更新日志
 
-## 未发布 — 2026-10-23
+## npm 1.10.2 — 2026-11-13
+
+### 启动盘制作（主菜单 35）
+
+- 新增 Windows To Go 模式：整盘应用 `install.wim/install.esd`，不再受 30GB 启动分区上限限制，64GB 等大容量磁盘可整盘使用。UEFI 采用 GPT（300MB EFI 系统分区 + NTFS 系统分区），UEFI+传统 BIOS 采用 MBR 单 NTFS 活动分区。
+- 两种模式均可选移除 TPM 2.0 / 安全启动 / 内存检查并跳过微软联网账户强制要求：普通安装盘写介质根目录 `unattend.xml`，WinToGo 写离线注册表与 `Windows\Panther` 应答文件。
+- 映像应用改用系统内置 `dism.exe /Apply-Image`（失败回退 DISM PowerShell cmdlet），应用后校验 `ntoskrnl.exe`、`winload.efi`、注册表配置单元及 BIOS/UEFI 启动文件。
+- 映像列表优先读取真实 `ImageIndex`，缺失时按枚举顺序自动编号；显示序号与实际应用索引分离，也支持直接输入真实索引。
+- 系统架构按 ISO 内 `efi\boot\boot*.efi` 文件名推断（`bootx64`/`bootaa64`/`bootia32`），再回退 WIM 元数据与本机架构；容量判断使用所选映像体积加余量，元数据缺失时按保守值估算。
+- EFI 系统分区不分配盘符：分区与卷一律通过 `Get-Partition`/`Get-Volume` 对象定位，EFI 文件以卷 GUID 路径（`\\?\Volume{...}\`）读写；仅在调用 `bcdboot /s` 时临时挂载访问路径并立即撤销。
+- UEFI 模式向 ESP 写入 `\EFI\Boot\bootx64.efi`（ARM64 为 `bootaa64.efi`）回退路径，便于 Intel Mac 的 Option 启动菜单识别；MBR 模式改用 `bcdboot /f ALL` 生成 BIOS/UEFI 双引导，失败自动回退纯 BIOS。
+- 按离线系统 `Select\Current` 定位控制集，将实际存在的 USB/存储控制器驱动设为引导启动，并标记 `PortableOperatingSystem` 与 `SanPolicy`，提升换机启动成功率（该步骤失败仅警告）。
+- 修复 GPT→MBR 转换（`Set-Disk` 不接受 `RAW`，改用 `diskpart clean`；样式已符合时跳过 `Initialize-Disk`）、离线注册表残留挂载锁住 hive 文件、以及 `bootsect.exe` 签名校验在 Security 模块不可用时回退读取 PE 内嵌证书。
+
+### 卸载与维护
+
+- 首次启动自动注册 HKCU 卸载表项，系统「应用和功能」可直接卸载；主菜单 91 提供卸载流程，需输入 UNINSTALL 确认，依次清理注册项、`%LOCALAPPDATA%\SystemToolbox` 数据目录与程序自身。
+- 诊断报告新增磁盘空间、开机启动项、网络配置三项；后台命令补充权限不足、找不到程序、用户取消的友好错误提示。
+
+### 构建与兼容性
+
+- 修复 MSVC C2026：内嵌 PowerShell 脚本按函数边界拆为三段相邻字符串拼接，每段低于 16KB，CI 的 MSVC 与 MinGW 构建均恢复通过。
+- 控制台输入链路：禁用 stdin 缓冲、增加输入结束保护、移除菜单路径上会抢占管道的 cmd 子进程；支持 `STB_MEDIA_*` 环境变量预置脚本交互选项（正常菜单交互不变）。
+
+### 同期未发布项（2026-10-23，已并入 1.10.2）
 
 - 发行压缩包仅包含 cpp、exe、md；移除 FastDL 主包内文件，CI 附件不再同时重复上传散装程序。校验清单作为压缩包外的独立附件。
 
