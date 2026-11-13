@@ -118,13 +118,14 @@ void RegisterUninstallEntry()
 
 // 卸载本工具箱：删除卸载注册项、数据目录与程序自身。返回 true 表示已确认卸载，调用方应退出程序。
 bool UninstallToolbox();
+bool RunPowerShellFile(const std::string& script, const std::vector<std::wstring>& parameters, bool interactive);
+std::string GetIsoBootMediaScript();
 
 // 控制台代码页设置为 UTF-8
 void SetUtf8Console()
 {
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
-    system("chcp 65001 >nul");
 }
 
 // 检查是否以管理员身份运行
@@ -162,14 +163,22 @@ bool ElevateSelf()
 // 清屏
 void ClearScreen()
 {
-    system("cls");
+    // 使用 ANSI 转义清屏，避免 system("cls") 启动的 cmd.exe 抢占重定向的 stdin
+    DWORD mode = 0;
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (GetConsoleMode(out, &mode) && SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+        std::cout << "\x1b[2J\x1b[H";
+    else
+        for (int i = 0; i < 40; ++i) std::cout << "\n";
 }
 
-// 暂停等待用户按键
+// 暂停等待用户按键（stdin 重定向时跳过等待，避免管道自动化挂死）
 void Pause()
 {
     std::cout << "\n按任意键返回菜单...";
-    _getch();
+    DWORD consoleMode = 0;
+    if (GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &consoleMode))
+        _getch();
     std::cout << std::endl;
 }
 
@@ -669,12 +678,17 @@ bool RunCmd(const std::string& cmd, bool showOutput = true, bool forceForeground
     return IsSuccessfulCommand(cmd, ret);
 }
 
-// 获取用户输入的字符串
+// 获取用户输入的字符串（stdin 结束时统一退出，避免菜单层级死循环）
 std::string GetInput(const std::string& prompt)
 {
     std::cout << prompt;
     std::string input;
     std::getline(std::cin, input);
+    if (!std::cin)
+    {
+        std::cout << "\n输入已结束，退出程序。\n";
+        exit(0);
+    }
     return input;
 }
 
@@ -951,6 +965,8 @@ std::string GetFileSHA256(const std::string &filePath)
 }
 int main()
 {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    setvbuf(stdin, nullptr, _IONBF, 0);
     SetUtf8Console();
 
     // 命令行卸载入口（供系统“应用和功能”的 UninstallString 调用）
@@ -11771,7 +11787,7 @@ bool IsProtectedMountPoint(const std::wstring& mount)
 
 std::string GetIsoBootMediaScript()
 {
-    return R"PS(param([string]$Image,[string]$ToolPath,[string]$Mode='Setup',[string]$PatchBypass='0')
+    return R"PS(param([string]$Image,[string]$ToolPath,[string]$Mode='Setup',[string]$PatchBypass='0',[string]$DiskNumber='0',[string]$BootMode='',[string]$ImageIndex='0',[string]$AutoConfirm='0')
 $ErrorActionPreference='Stop'
 function Assert-MediaDisk($Disk,$ProtectedNumbers) {
     if ($null -eq $Disk -or $Disk.IsBoot -or $Disk.IsSystem -or $Disk.IsOffline -or
@@ -11842,6 +11858,74 @@ function Write-UnattendFile([string]$FilePath,[string]$PsArch) {
     $unattend = Get-BypassUnattend $PsArch
     [IO.File]::WriteAllText($FilePath, $unattend, (New-Object System.Text.UTF8Encoding($false)))
 }
+function Get-MediaArchitecture([string]$SourceRoot,[string]$InstallPath,[int]$WimIndex) {
+    # 优先用 ISO 内的 EFI 启动文件名判断架构：bootx64=amd64，bootaa64=arm64，bootia32=x86
+    $map = [ordered]@{ 'bootx64.efi'='9'; 'bootaa64.efi'='12'; 'bootia32.efi'='0'; 'bootia64.efi'='6' }
+    $efiFiles = @(Get-ChildItem -LiteralPath (Join-Path $SourceRoot 'efi\boot') -Filter 'boot*.efi' -File -ErrorAction SilentlyContinue)
+    foreach ($name in $map.Keys) {
+        if (@($efiFiles | Where-Object Name -ieq $name).Count -gt 0) { return $map[$name] }
+    }
+    if ($InstallPath -and $WimIndex -gt 0) {
+        try {
+            $obj = Get-WindowsImage -ImagePath $InstallPath -Index $WimIndex -ErrorAction SilentlyContinue
+            $a = if ($obj) { [string]$obj.Architecture } else { '' }
+            if ($a -match '^(9|12|6|0)$') { return $a }
+            if ($a -match 'arm64') { return '12' }
+            if ($a -match 'x86') { return '0' }
+            if ($a -match 'amd64|x64') { return '9' }
+        } catch { }
+    }
+    $envArch = [string]$env:PROCESSOR_ARCHITECTURE
+    if ($envArch -eq 'ARM64') { return '12' }
+    if ($envArch -eq 'x86') { return '0' }
+    return '9'
+}
+function Enable-PortableBoot([string]$WindowsDir) {
+    # 标准 Windows To Go：USB/存储控制器驱动随系统引导，换一台电脑也能启动
+    $hive = Join-Path $WindowsDir 'System32\config\SYSTEM'
+    if (-not (Test-Path -LiteralPath $hive)) { throw "缺少 SYSTEM 注册表配置单元: $hive" }
+    reg load 'HKLM\STB_WTGSYS' "$hive" | Out-Null
+    try {
+        $current = (Get-ItemProperty -Path 'HKLM:\STB_WTGSYS\Select' -Name Current -ErrorAction SilentlyContinue).Current
+        if (-not $current) { $current = 1 }
+        $cs = 'HKLM:\STB_WTGSYS\ControlSet' + ('{0:000}' -f [int]$current)
+        if (-not (Test-Path -LiteralPath $cs)) { $cs = 'HKLM:\STB_WTGSYS\ControlSet001' }
+        if (-not (Test-Path -LiteralPath $cs)) { throw '无法定位离线系统的控制集。' }
+        $ctrl = Join-Path $cs 'Control'
+        New-ItemProperty -Path $ctrl -Name PortableOperatingSystem -Value 1 -PropertyType DWord -Force | Out-Null
+        $partmgr = Join-Path $cs 'Control\partmgr\Parameters'
+        if (-not (Test-Path -LiteralPath $partmgr)) { $partmgr = Join-Path $cs 'Services\partmgr\Parameters' }
+        if (Test-Path -LiteralPath $partmgr) {
+            New-ItemProperty -Path $partmgr -Name SanPolicy -Value 4 -PropertyType DWord -Force | Out-Null
+        }
+        foreach ($svc in @('usbccgp','usbstor','usbhub3','UASPStor','storahci','stornvme','USBXHCI','iusb3xhc')) {
+            $key = Join-Path $cs "Services\$svc"
+            if (Test-Path -LiteralPath $key) {
+                New-ItemProperty -Path $key -Name Start -Value 0 -PropertyType DWord -Force | Out-Null
+            }
+        }
+    } finally { [void](reg unload 'HKLM\STB_WTGSYS') }
+}
+function Assert-WindowsApplied([string]$TargetRoot) {
+    foreach ($rel in @('Windows\System32\ntoskrnl.exe','Windows\System32\winload.efi','Windows\System32\config\SYSTEM','Windows\System32\drivers\ntfs.sys')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $TargetRoot $rel))) { throw "映像应用不完整，缺少 $rel；请重新制作。" }
+    }
+}
+function Install-EfiFallback([string]$EspLetter,[string]$PsArch) {
+    # Intel Mac / 通用固件的启动菜单只识别 ESP 上的回退路径 \EFI\Boot\bootx64.efi
+    $fallback = switch ($PsArch) { '12' {'bootaa64.efi'} '0' {'bootia32.efi'} '6' {'bootia64.efi'} default {'bootx64.efi'} }
+    $msBoot = Join-Path $EspLetter 'EFI\Microsoft\Boot'
+    $efiBoot = Join-Path $EspLetter 'EFI\Boot'
+    $loader = Join-Path $msBoot 'bootmgfw.efi'
+    if (-not (Test-Path -LiteralPath $loader)) { throw 'UEFI 启动文件未生成（缺少 bootmgfw.efi）。' }
+    New-Item -ItemType Directory -Path $efiBoot -Force | Out-Null
+    foreach ($extra in @('BCD','bootmgr.efi','memtest.efi')) {
+        $file = Join-Path $msBoot $extra
+        if (Test-Path -LiteralPath $file) { Copy-Item -LiteralPath $file -Destination $efiBoot -Force -ErrorAction SilentlyContinue }
+    }
+    Copy-Item -LiteralPath $loader -Destination (Join-Path $efiBoot $fallback) -Force
+    if (-not (Test-Path -LiteralPath (Join-Path $efiBoot $fallback))) { throw "未能写入 EFI 回退启动文件 $fallback。" }
+}
 )PS"
            R"PS(function Get-ProtectedMediaDisks {
     $numbers = @()
@@ -11885,22 +11969,40 @@ try {
         -not (Test-Path -LiteralPath ($source+'bootmgr'))) { throw '当前仅支持 Windows 安装/WinPE ISO。' }
     $efi = @(Get-ChildItem -LiteralPath ($source+'efi\boot') -Filter 'boot*.efi' -File)
     if ($efi.Count -eq 0) { throw '镜像缺少 UEFI 启动文件。' }
+    $mediaArch = Get-MediaArchitecture $source $null 0
     $wtg = $Mode -ieq 'WTG'
     $installPath = $null
     $imageIndex = 1
+    $selectedSize = [uint64]0
     if ($wtg) {
         $installRel = @('sources\install.wim','sources\install.esd') | Where-Object { Test-Path -LiteralPath ($source+$_) } | Select-Object -First 1
         if (-not $installRel) { throw '镜像缺少 install.wim/install.esd，无法制作 Windows To Go。' }
         $installPath = $source + $installRel
         $images = @(Get-WindowsImage -ImagePath $installPath)
         if ($images.Count -eq 0) { throw '无法读取可安装的系统映像。' }
-        $images | Select-Object Index,ImageName,@{n='GB';e={[math]::Round($_.ImageSize/1GB,1)}} | Format-Table -AutoSize | Out-Host
-        $indexInput = Read-Host '要安装的系统映像序号（默认 1）'
-        if ($indexInput -eq '') { $indexInput = '1' }
+        # 兼容不同 DISM 版本：真实索引可能是 ImageIndex / Index，也可能整个缺失；缺失时按枚举顺序自行编号
+        $imageTable = @()
+        for ($i = 0; $i -lt $images.Count; ++$i) {
+            $realIndex = 0
+            foreach ($candidate in @($images[$i].ImageIndex, $images[$i].Index)) {
+                if ($null -ne $candidate -and [string]$candidate -match '^\d+$' -and [int]$candidate -ge 1) { $realIndex = [int]$candidate; break }
+            }
+            if ($realIndex -eq 0) { $realIndex = $i + 1 }
+            $imgSize = 0
+            if ($images[$i].ImageSize) { $imgSize = [uint64]$images[$i].ImageSize }
+            $imageTable += [pscustomobject]@{ No = $i + 1; RealIndex = $realIndex; Size = $imgSize }
+            Write-Host ('  {0}. {1}（{2:N1} GB）' -f ($i + 1), $images[$i].ImageName, ($imgSize / 1GB))
+        }
+        if ($ImageIndex -ne '0') { $indexInput = $ImageIndex } else { $indexInput = Read-Host '要安装的系统映像序号（默认 1）' }
+        if ([string]::IsNullOrWhiteSpace($indexInput)) { $indexInput = '1' }
         if ($indexInput -notmatch '^\d+$') { throw '映像序号无效。' }
-        $chosen = $images | Where-Object { [int]$_.Index -eq [int]$indexInput }
-        if (-not $chosen) { throw '映像序号不存在。' }
-        $imageIndex = [int]$indexInput
+        $pick = [int]$indexInput
+        $selected = $imageTable | Where-Object No -eq $pick | Select-Object -First 1
+        if (-not $selected) { $selected = $imageTable | Where-Object RealIndex -eq $pick | Select-Object -First 1 }
+        if (-not $selected) { throw "映像序号不存在（可选 1-$($imageTable.Count)）。" }
+        $imageIndex = [int]$selected.RealIndex
+        $selectedSize = [uint64]$selected.Size
+        $mediaArch = Get-MediaArchitecture $source $installPath $imageIndex
     } else {
         $files = @(Get-ChildItem -LiteralPath $source -File -Recurse -Force)
         $large = @($files | Where-Object Length -gt 4294967295)
@@ -11915,7 +12017,7 @@ try {
     }
     $protected = @(Get-ProtectedMediaDisks)
     Get-Disk | Select-Object Number,FriendlyName,SerialNumber,BusType,@{n='GiB';e={[math]::Round($_.Size/1GB,2)}},IsBoot,IsSystem | Format-Table -AutoSize | Out-Host
-    $inputNumber = Read-Host '目标物理磁盘编号（留空取消；整盘所有分区和数据将被清除）'
+    if ($DiskNumber -ne '0') { $inputNumber = $DiskNumber } else { $inputNumber = Read-Host '目标物理磁盘编号（留空取消；整盘所有分区和数据将被清除）' }
     if ($inputNumber -eq '') { return }
     if ($inputNumber -notmatch '^\d{1,5}$') { throw '磁盘编号无效。' }
     $disk = Get-Disk -Number ([int]$inputNumber)
@@ -11923,15 +12025,21 @@ try {
     $identity = [string]$disk.UniqueId
     $diskSize = [uint64]$disk.Size
     if ($wtg) {
-        $chosenImage = Get-WindowsImage -ImagePath $installPath -Index $imageIndex
-        if ([uint64]$diskSize -lt ([uint64]$chosenImage.ImageSize + 2GB)) { throw '目标磁盘空间不足以安装该系统映像。' }
+        $need = [uint64]$selectedSize
+        if ($need -eq 0) { $need = 20GB }  # 元数据缺失时按保守值估算，不再静默跳过容量检查
+        if ($diskSize -lt 20GB) { throw 'Windows To Go 需要至少 20GB 容量的磁盘。' }
+        if ($diskSize -lt ($need + 3GB)) {
+            throw ("磁盘空间不足：映像约 {0:N1} GB，目标盘仅 {1:N1} GB。" -f ($need/1GB), ($diskSize/1GB))
+        }
     } elseif ($diskSize -lt ($required+2MB)) { throw '磁盘空间不足。' }
-    $mode = Read-Host '启动模式：1=UEFI（默认），2=UEFI+传统 BIOS'
-    if ($mode -notin @('','1','2')) { throw '启动模式无效。' }
+    if ($BootMode) { $mode = $BootMode } else { $mode = Read-Host '启动模式：1=UEFI（默认），2=UEFI+传统 BIOS' }
+    if ([string]::IsNullOrWhiteSpace($mode)) { $mode = '1' }
+    if ($mode -notin @('1','2')) { throw '启动模式无效（只能输入 1 或 2）。' }
     $legacy = $mode -eq '2'
     $bootsect = Join-Path $env:SystemRoot 'System32\bootsect.exe'
     if ($legacy) {
         if (-not (Test-Path -LiteralPath $bootsect)) { $bootsect = $source+'boot\bootsect.exe' }
+        if (-not (Test-Path -LiteralPath $bootsect)) { throw 'BIOS 模式需要 bootsect.exe，但系统目录与镜像中均未找到。' }
         $signature = Get-AuthenticodeSignature -LiteralPath $bootsect
         if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft') {
             throw 'BIOS 模式需要已通过微软数字签名校验的 bootsect.exe。'
@@ -11945,19 +12053,26 @@ try {
         Write-Host '警告：将清除以上物理磁盘的全部分区和数据，创建最大 30GB 的 MBR/FAT32 启动分区；剩余空间保持未分配。' -ForegroundColor Yellow
     }
     $confirmation = 'ERASE '+$disk.Number+' '+$identity
-    if ((Read-Host "确认请输入完整内容：$confirmation") -cne $confirmation) { Write-Host '已取消。'; return }
+    if ($AutoConfirm -eq '1') { Write-Host "已通过命令行参数确认清盘：$confirmation" } elseif ((Read-Host "确认请输入完整内容：$confirmation") -cne $confirmation) { Write-Host '已取消。'; return }
     $fresh = Get-Disk -Number $disk.Number
     Assert-MediaDisk $fresh @(Get-ProtectedMediaDisks)
     if ([string]$fresh.UniqueId -cne $identity -or [uint64]$fresh.Size -ne $diskSize) { throw '磁盘身份已变化，停止写入。' }
     # shortcut: 留在前台执行，避免暂停/退出后台队列使分区或写入半途终止。
 )PS"
            R"PS(    $started = $true
-    if ($fresh.PartitionStyle -ne 'RAW') {
-        Clear-Disk -InputObject $fresh -RemoveData -RemoveOEM -Confirm:$false
-    }
     $partStyle = 'MBR'
     if ($wtg -and -not $legacy) { $partStyle = 'GPT' }
-    $fresh = Initialize-Disk -InputObject $fresh -PartitionStyle $partStyle -PassThru
+    if ($fresh.PartitionStyle -ne 'RAW') {
+        Clear-Disk -InputObject $fresh -RemoveData -RemoveOEM -Confirm:$false -ErrorAction SilentlyContinue
+    }
+    Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | Remove-Partition -Confirm:$false -ErrorAction SilentlyContinue
+    $fresh = Get-Disk -Number $disk.Number
+    if ($fresh.PartitionStyle -ne $partStyle) {
+        if ($fresh.PartitionStyle -ne 'RAW') {
+            Set-Disk -InputObject $fresh -PartitionStyle RAW -ErrorAction Stop
+        }
+        $fresh = Initialize-Disk -InputObject $fresh -PartitionStyle $partStyle -PassThru
+    }
     if ($wtg) {
         if ($legacy) {
             $partition = New-Partition -InputObject $fresh -UseMaximumSize -AssignDriveLetter -IsActive
@@ -11970,26 +12085,49 @@ try {
         }
         if (-not $volume.DriveLetter) { throw '新分区没有可用盘符。' }
         $target = "$($volume.DriveLetter):\"
+        if ($selectedSize -gt 0 -and [uint64]$volume.SizeRemaining -lt $selectedSize) {
+            throw '格式化后的可用空间小于映像体积，无法继续。'
+        }
         Write-Host "正在把 Windows 映像应用到 $target ，可能需要数分钟到半小时以上（取决于磁盘速度），请勿中断..."
-        Expand-WindowsImage -ImagePath $installPath -ApplyIndex $imageIndex -ApplyPath $target | Out-Null
+        $dism = Join-Path $env:SystemRoot 'System32\dism.exe'
+        if (Test-Path -LiteralPath $dism) {
+            & $dism '/Apply-Image' "/ImageFile:$installPath" "/Index:$imageIndex" "/ApplyDir:$target" '/NoRestart'
+            if ($LASTEXITCODE -ne 0) { throw "应用 Windows 映像失败，DISM 退出码 $LASTEXITCODE" }
+        } else {
+            Expand-WindowsImage -ImagePath $installPath -ApplyPath $target -Index $imageIndex | Out-Null
+        }
+        Assert-WindowsApplied $target
         $bcdboot = Join-Path $env:SystemRoot 'System32\bcdboot.exe'
+        if (-not (Test-Path -LiteralPath $bcdboot)) { throw "系统缺少 bcdboot.exe：$bcdboot" }
         if ($legacy) {
             & $bcdboot "$target\Windows" /s "$target" /f BIOS
             if ($LASTEXITCODE -ne 0) { throw 'bcdboot 写入 BIOS 启动文件失败。' }
             & $bootsect /nt60 "$target" /mbr
             if ($LASTEXITCODE -ne 0) { throw "写入 BIOS 启动代码失败: $LASTEXITCODE" }
+            if (-not (Test-Path -LiteralPath ($target+'bootmgr')) -or -not (Test-Path -LiteralPath ($target+'Boot\BCD'))) {
+                throw 'BIOS 启动文件校验失败（缺少 bootmgr 或 Boot\BCD）。'
+            }
         } else {
-            $espLetter = "$($esp.DriveLetter):"
+            $espPartition = @(Get-Partition -DiskNumber $disk.Number | Where-Object GptType -eq '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}')[0]
+            if (-not $espPartition -or -not $espPartition.DriveLetter) { throw '无法确定 EFI 系统分区盘符。' }
+            $espLetter = "$($espPartition.DriveLetter):"
             & $bcdboot "$target\Windows" /s $espLetter /f UEFI
             if ($LASTEXITCODE -ne 0) { throw 'bcdboot 写入 UEFI 启动文件失败。' }
+            Install-EfiFallback $espLetter $mediaArch
+            Write-Host '已写入 EFI 回退启动文件（Intel Mac 开机按 Option 可选 EFI Boot）。' -ForegroundColor Green
+        }
+        try {
+            Write-Host '正在配置便携式启动（USB 控制器驱动随系统引导）...'
+            Enable-PortableBoot "$target\Windows"
+        } catch {
+            Write-Host "便携式启动配置未完成（不影响启动文件，可稍后重试）：$_" -ForegroundColor Yellow
         }
         if ($PatchBypass -eq '1') {
             Write-Host '正在写入离线绕过配置（TPM/安全启动/内存检查 + 跳过微软联网账户）...'
             Set-OfflineBypass "$target\Windows"
-            $arch = [string](Get-WindowsImage -ImagePath $installPath -Index $imageIndex).Architecture
             $panther = Join-Path $target 'Windows\Panther'
             New-Item -ItemType Directory -Path $panther -Force | Out-Null
-            Write-UnattendFile (Join-Path $panther 'unattend.xml') $arch
+            Write-UnattendFile (Join-Path $panther 'unattend.xml') $mediaArch
         }
         Write-Host "Windows To Go 制作完成：$target；请安全弹出后从固件启动菜单选择此磁盘。" -ForegroundColor Green
         if ($PatchBypass -eq '1') {
@@ -12021,8 +12159,7 @@ try {
         if ($split -and @(Get-ChildItem -LiteralPath ($target+'sources') -Filter 'install*.swm' -File).Count -eq 0) { throw '缺少分卷安装文件。' }
         if ($PatchBypass -eq '1') {
             Write-Host '正在写入安装介质绕过配置（TPM/安全启动/内存检查 + 跳过微软联网账户）...'
-            $bootArch = [string](Get-WindowsImage -ImagePath ($source+'sources\boot.wim') -Index 1).Architecture
-            Write-UnattendFile ($target+'unattend.xml') $bootArch
+            Write-UnattendFile ($target+'unattend.xml') $mediaArch
         }
         Write-Host "制作完成：$target；启动文件已写入，请安全弹出后从固件启动菜单选择此磁盘。" -ForegroundColor Green
     }
@@ -12117,11 +12254,27 @@ void CreateIsoBootMedia()
     bool wtg = modeChoice == "2";
     std::string patch;
     if (GetInput("是否移除 TPM 2.0/安全启动/内存检查并跳过微软联网账户要求（输入 Y 启用，其余跳过）: ") == "Y") patch = "1";
+    // 自动化辅助：通过环境变量预置脚本内的交互选项（磁盘编号/启动模式/映像序号/确认），不影响正常菜单交互
+    auto envValue = [](const char* name) -> std::string {
+        char buffer[256] = {};
+        DWORD length = GetEnvironmentVariableA(name, buffer, sizeof(buffer));
+        if (!length || length >= sizeof(buffer)) return "";
+        return buffer;
+    };
+    std::string diskArg = envValue("STB_MEDIA_DISK");
+    std::string bootArg = envValue("STB_MEDIA_MODE");
+    std::string indexArg = envValue("STB_MEDIA_INDEX");
+    std::string confirmArg = envValue("STB_MEDIA_CONFIRM");
+    if (diskArg.empty()) diskArg = "0";
+    if (indexArg.empty()) indexArg = "0";
+    if (confirmArg.empty()) confirmArg = "0";
+    auto toWide = [](const std::string& text) { return std::wstring(text.begin(), text.end()); };
     std::vector<wchar_t> program(32768);
     DWORD size = GetModuleFileNameW(nullptr, program.data(), static_cast<DWORD>(program.size()));
     if (!size || size >= program.size()) { std::cout << "无法确认工具箱所在路径。\n"; return; }
     RunPowerShellFile(GetIsoBootMediaScript(), {image.wstring(), std::wstring(program.data()),
-        wtg ? std::wstring(L"WTG") : std::wstring(L"Setup"), std::wstring(patch.begin(), patch.end())}, true);
+        wtg ? std::wstring(L"WTG") : std::wstring(L"Setup"), toWide(patch),
+        toWide(diskArg), toWide(bootArg), toWide(indexArg), toWide(confirmArg)}, true);
     Pause();
 }
 
