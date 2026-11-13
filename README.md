@@ -6,7 +6,7 @@
 
 **System Toolbox** —— 免费开源的 Windows 10/11 系统维护工具箱，集成后台任务队列、高速下载、音乐转码和磁盘工具。
 
-[下载 v1.10.2 ZIP](https://github.com/huvubb/system-toolbox/releases/download/v1.10.2/system-toolbox-windows.zip) · [下载独立 EXE](https://github.com/huvubb/system-toolbox/releases/download/v1.10.2/system-toolbox.exe) · [更新说明与校验清单](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.2) · [项目介绍](https://huvubb.github.io/system-toolbox/)
+[下载 v1.10.3 ZIP](https://github.com/huvubb/system-toolbox/releases/download/v1.10.3/system-toolbox-windows.zip) · [下载独立 EXE](https://github.com/huvubb/system-toolbox/releases/download/v1.10.3/system-toolbox.exe) · [更新说明与校验清单](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.3) · [项目介绍](https://huvubb.github.io/system-toolbox/)
 
 > 🇨🇳 **国内直链（免代理、更快）**：[在线介绍页](https://q23213ddssd.dpdns.org/system-toolbox/) · [ZIP 直接下载](https://q23213ddssd.dpdns.org/downloads/system-toolbox-windows.zip) · [SHA256 校验清单](https://q23213ddssd.dpdns.org/downloads/system-toolbox-SHA256SUMS.txt)（与 GitHub Release 同一文件，可用哈希核对）
 
@@ -15,6 +15,17 @@ Open-source Windows maintenance toolbox with background queues, resumable downlo
 ### 本地功能更新
 
 在主菜单 36 中新增磁盘剩余空间（7）、开机启动项（8）和网络配置摘要（9）。每项以中文展示结果和建议，并将报告保存到工具箱数据目录；启动项包含命令和来源，网络报告含本机 IP、网关和 DNS，分享前请检查内容。仅查询，不修改启动设置或网络配置。通用操作也会区分权限不足、文件缺失和用户取消，并给出下一步建议。
+
+### v1.10.3
+
+主菜单 **38 → AI 算力测试** 新增：CPU 以 FP32 矩阵乘法测量单核/多核 GFLOPS 与并行加速比，并以 INT8 乘加测量整数推理速率；GPU 通过 DirectX 11 计算着色器执行 FMA 压测，输出单精度算力（GFLOPS）并校验计算结果；内存带宽测试测量多线程写入/读取/复制速度（GB/s）。全部在本机运行，结果仅供参考，离线模式可用。
+
+硬件压力测试（主菜单 10）补齐 GPU 选项并完整实现内存与 GPU 测试：
+
+- 新增 GPU 压力测试入口（DirectX 11 / OpenGL / 多窗口）。DirectX 11 测试现真正编译并绑定顶点/像素着色器，配合顶点旋转动画形成实际渲染负载，关闭垂直同步并在窗口标题实时显示 FPS；此前版本着色器从未编译绑定，GPU 实际处于空载。
+- 内存压力测试支持 7 种图案（全 0/全 1/交替/棋盘/随机数据）全量逐字节校验，失败时定位首个错误字节偏移；带宽测试测量多线程写入/读取/复制速度。
+
+更新后内容提示可关闭：更新内容页可选择“不再显示更新提示”，之后更新完成直接进入主菜单；主菜单 25（软件更新）中可重新开启。设置保存在 `%LOCALAPPDATA%\SystemToolbox\settings.txt`。
 
 ### v1.10.2
 
@@ -77,7 +88,7 @@ Open-source Windows maintenance toolbox with background queues, resumable downlo
 | 7 | ZIP 解压 | 通过 PowerShell 解压 ZIP 压缩包 |
 | 8 | 休眠管理 | 开启/关闭休眠与快速启动 |
 | 9 | 虚拟内存管理 | 自动或自定义设置分页文件 |
-| 10 | 硬件压力测试 | 硬盘 / 内存 / CPU / GPU / 网络 / 接口 |
+| 10 | 硬件压力测试 | 硬盘 / 内存（图案校验+带宽）/ CPU / GPU / 网络 / 接口 |
 | 11 | 安全检测 | 计划任务 / 进程 / 注册表自启动探测 |
 | 12 | 文件数字签名 | 生成自签名证书并对文件签名 |
 | 13 | DISM WIM 工具 | 解压 / 打包 / 挂载 / 索引管理 |
@@ -89,6 +100,7 @@ Open-source Windows maintenance toolbox with background queues, resumable downlo
 | 19 | NPM 工具安装 | 一键安装 AI 工具 / 构建工具 / 框架 / 数据库客户端 |
 | 36 | 系统诊断与报告 | 电池、睡眠、异常重启、更新历史、软件清单 |
 | 37 | DirectX 与 DLL 修复 | 旧版游戏运行库、系统组件与文件检查 |
+| 38 | AI 算力测试 | CPU FP32/INT8、GPU Compute GFLOPS、内存带宽 |
 | 91 | 卸载本工具箱 | 删除卸载注册项、数据目录与程序自身 |
 
 程序首次启动时会在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\SystemToolbox` 写入卸载注册信息，可在系统“设置 → 应用 → 安装的应用”中看到并直接卸载（调用 `system-toolbox.exe /uninstall`）；主菜单 91 提供同样的卸载流程。卸载会删除该注册表项、`%LOCALAPPDATA%\SystemToolbox` 数据目录（含 DLC、报告、下载缓存）与程序 EXE 文件本身，需输入 `UNINSTALL` 确认；不会删除用户另存的文件，已修改的系统设置（休眠、服务、用户 PATH 等）不会自动还原。

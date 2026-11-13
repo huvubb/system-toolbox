@@ -10,9 +10,16 @@
 
 **System Toolbox** is a free, open-source maintenance toolbox for **Windows 10/11** that consolidates system maintenance, software installation, fast downloads, audio conversion, and disk management into a single console. It is written in C++17/20, released under the MIT license, and is fully portable — extract and run.
 
-[⬇️ Download v1.9 (complete ZIP)](https://github.com/huvubb/system-toolbox/releases/download/v1.9/system-toolbox-windows.zip) · [Release notes & checksums](https://github.com/huvubb/system-toolbox/releases/tag/v1.9) · [Website](https://huvubb.github.io/system-toolbox/)
+[⬇️ Download v1.10.3 (ZIP)](https://github.com/huvubb/system-toolbox/releases/download/v1.10.3/system-toolbox-windows.zip) · [Release notes & checksums](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.3) · [Website](https://huvubb.github.io/system-toolbox/)
 
 ---
+
+## ✨ What's new in v1.10.3
+
+- **AI compute benchmark (menu 38)** — CPU FP32 matrix-multiply GFLOPS (single-core vs multi-core speedup), INT8 multiply-add throughput, DirectX 11 compute-shader GPU GFLOPS with result verification, and multi-threaded memory bandwidth (write/read/copy GB/s). Runs fully offline.
+- **Real GPU stress testing** — the DirectX 11 test now compiles and binds vertex/pixel shaders with animated geometry, disables vsync and shows live FPS; the stress-test menu gained a dedicated GPU entry (DirectX 11 / OpenGL / multi-window).
+- **Complete memory stress test** — 7 full-verification bit patterns (including random data) with first-error-offset reporting, plus multi-threaded write/read/copy bandwidth measurement.
+- **Suppress the post-update notice** — choose "do not show update content again" after an update; re-enable it anytime from menu 25. Stored in `%LOCALAPPDATA%\SystemToolbox\settings.txt`.
 
 ## ✨ What's new in v1.9
 
@@ -48,7 +55,7 @@ Built for **Windows power users, system administrators, and developers** who wan
 | 7 | ZIP extraction | Extract ZIP archives via PowerShell |
 | 8 | Hibernation control | Toggle hibernation and Fast Startup |
 | 9 | Virtual memory | Automatic or custom page-file configuration |
-| 10 | Hardware stress tests | Disk / memory / CPU / GPU / network / interface |
+| 10 | Hardware stress tests | Disk / memory (pattern verify + bandwidth) / CPU / GPU / network / interface |
 | 11 | Security inspection | Scheduled tasks, processes, and registry auto-start detection |
 | 12 | Digital signatures | Generate a self-signed certificate and sign files |
 | 13 | DISM / WIM tools | Extract / capture / mount / index management |
@@ -58,8 +65,9 @@ Built for **Windows power users, system administrators, and developers** who wan
 | 17 | Low-level NTDLL API | OS version / process / time queries and file operations |
 | 18 | Imaging | ESD/WIM conversion, ISO inspection, image deployment |
 | 19 | NPM tool installer | One-command install of AI tools, build tools, frameworks, DB clients |
+| 38 | AI compute benchmark | CPU FP32/INT8, GPU compute GFLOPS, memory bandwidth |
 
-Plus: a **background task queue** (menu 31), **fastdl downloads** (menu 32), the **DiskTool add-on** (menu 33), and **image/volume mounting** (menu 34).
+Plus: a **background task queue** (menu 31), **fastdl downloads** (menu 32), the **DiskTool add-on** (menu 33), **image/volume mounting** (menu 34), and more system diagnostics (menus 36–37).
 
 ---
 
@@ -124,10 +132,6 @@ Menu 33 installs the DiskTool add-on from a user-provided URL or a local build, 
 Runtime records and configuration backups are stored in `%LOCALAPPDATA%\SystemToolbox`.
 
 ---
-
-## Install with npm
-
-On Windows x64 with Node.js 18+, run `npm install system-toolbox`, then `npx system-toolbox`. For a global command, use `npm install -g system-toolbox`, then `system-toolbox`. Package 1.9.1 bundles all three native EXEs and requires no postinstall binary download. Administrator rights are requested when launching the toolbox.
 
 ## 🛡️ Safety
 

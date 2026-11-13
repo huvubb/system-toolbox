@@ -1,6 +1,6 @@
 {
   "name": "system-toolbox",
-  "version": "1.10.2",
+  "version": "1.10.3",
   "description": "Open-source Windows maintenance toolbox with bundled native binaries, background queues, audio and disk tools.",
   "bin": {
     "system-toolbox": "cli.js"
@@ -26,13 +26,16 @@
     "bin/SHA256SUMS.txt"
   ],
   "keywords": [
-    "windows",
-    "toolbox",
-    "maintenance",
-    "winget",
+    "ai",
     "audio-converter",
+    "benchmark",
     "disk",
-    "iso"
+    "gpu",
+    "iso",
+    "maintenance",
+    "toolbox",
+    "windows",
+    "winget"
   ],
   "license": "MIT",
   "author": "huvubb <810372789@qq.com>",

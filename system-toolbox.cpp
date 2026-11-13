@@ -80,6 +80,75 @@ std::filesystem::path GetToolboxDataDirectory()
     return error ? std::filesystem::path{} : path;
 }
 
+// ==================== 用户设置（settings.txt，key=value） ====================
+std::filesystem::path GetSettingsFilePath()
+{
+    auto directory = GetToolboxDataDirectory();
+    if (directory.empty()) return {};
+    return directory / L"settings.txt";
+}
+
+std::string TrimSettingText(const std::string& text)
+{
+    size_t begin = text.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) return "";
+    size_t end = text.find_last_not_of(" \t\r\n");
+    return text.substr(begin, end - begin + 1);
+}
+
+// 读取设置项；不存在返回空字符串
+std::string GetSettingsValue(const std::string& key)
+{
+    auto path = GetSettingsFilePath();
+    if (path.empty()) return "";
+    std::ifstream file(path);
+    if (!file.is_open()) return "";
+    std::string line;
+    while (std::getline(file, line))
+    {
+        auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        if (TrimSettingText(line.substr(0, eq)) != key) continue;
+        return TrimSettingText(line.substr(eq + 1));
+    }
+    return "";
+}
+
+// 写入或更新设置项，保留其余内容
+void SetSettingsValue(const std::string& key, const std::string& value)
+{
+    auto path = GetSettingsFilePath();
+    if (path.empty()) return;
+    std::vector<std::string> lines;
+    std::ifstream file(path);
+    std::string line;
+    bool replaced = false;
+    while (std::getline(file, line))
+    {
+        auto eq = line.find('=');
+        if (!replaced && eq != std::string::npos && TrimSettingText(line.substr(0, eq)) == key)
+        {
+            lines.push_back(key + "=" + value);
+            replaced = true;
+        }
+        else
+        {
+            lines.push_back(line);
+        }
+    }
+    file.close();
+    if (!replaced) lines.push_back(key + "=" + value);
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) return;
+    for (const auto& entry : lines) out << entry << "\n";
+}
+
+// 是否已选择“不再显示更新提示”
+bool IsUpdateNoticeSuppressed()
+{
+    return GetSettingsValue("SkipUpdateNotice") == "1";
+}
+
 // ==================== 卸载支持 ====================
 // 每次启动时刷新 HKCU 卸载注册表项（首次启动即完成注册），供系统“应用和功能”识别与卸载。
 void RegisterUninstallEntry()
@@ -743,6 +812,7 @@ std::string GetLocalExeHash();
 std::string GetRemoteExeHash(const std::string& zipPath);
 bool CheckJustUpdated();
 void ShowUpdateContent();
+void SaveCurrentVersion();
 
 // 软件与运行库
 void InstallRuntimes();
@@ -759,12 +829,18 @@ bool IsFeatureAvailable(const std::string& feature);
 void StressTestMenu();
 void NetworkStressTest();
 void InterfaceStressTest();
+void MemoryStressTest();
+void MemoryBandwidthMenu();
+void GpuStressSubMenu();
+void CpuAiBenchmark();
+void AiComputeMenu();
 
 
 // GPU 工具
 void GetGpuInfo();
 void OpenGLTest();
 void DirectX11Test();
+void GpuAiComputeTest();
 void VulkanTest();
 void GpuMultiWindowTest();
 void GpuToolsMenu();
@@ -997,10 +1073,13 @@ int main()
         g_bOnlineMode = false;
     }
 
-    // 检查是否刚更新过
+    // 检查是否刚更新过（用户选择“不再提示”时跳过展示，仅记录版本）
     if (CheckJustUpdated())
     {
-        ShowUpdateContent();
+        if (IsUpdateNoticeSuppressed())
+            SaveCurrentVersion();
+        else
+            ShowUpdateContent();
     }
 
 
@@ -1093,6 +1172,7 @@ int main()
         std::cout << "35. ISO 写入磁盘制作启动盘 / Windows To Go\n";
         std::cout << "36. 系统诊断与报告（电池/睡眠/蓝屏/更新/软件）\n";
         std::cout << "37. DirectX 与 DLL 修复\n";
+        std::cout << "38. AI 算力测试（CPU/GPU GFLOPS、INT8、内存带宽）\n";
         std::cout << "90. 切换在线/离线模式\n";
         std::cout << "91. 卸载本工具箱\n";
         std::cout << " 0. 退出程序\n";
@@ -1156,6 +1236,7 @@ int main()
             case 35: CreateIsoBootMedia(); break;
             case 36: DiagnosticsMenu(); break;
             case 37: DirectXRepairMenu(); break;
+            case 38: AiComputeMenu(); break;
 
             case 90:  // 切换模式
                 ToggleMode();
@@ -2148,6 +2229,426 @@ void ManageVirtualMemory()
     Pause();
 }
 
+// ==================== 内存带宽测量（内存压测与 AI 算力共用） ====================
+// 并行执行写入/读取/复制各 3 轮，返回每轮最佳带宽（GB/s）。返回 false 表示内存分配失败。
+bool MeasureMemoryBandwidth(size_t bytes, int threads, double& writeGBs, double& readGBs, double& copyGBs)
+{
+    writeGBs = readGBs = copyGBs = 0.0;
+    if (threads <= 0)
+    {
+        unsigned hw = std::thread::hardware_concurrency();
+        threads = hw ? static_cast<int>(hw) : 4;
+    }
+    if (threads > 64) threads = 64;
+    if (bytes < static_cast<size_t>(threads) * 1024 * 1024)
+        bytes = static_cast<size_t>(threads) * 1024 * 1024;
+
+    unsigned char* buffer = nullptr;
+    unsigned char* copyBuffer = nullptr;
+    try
+    {
+        buffer = new unsigned char[bytes];
+        copyBuffer = new unsigned char[bytes];
+    }
+    catch (std::bad_alloc&)
+    {
+        delete[] buffer;
+        delete[] copyBuffer;
+        return false;
+    }
+
+    struct BwResult { double writeSec; double readSec; double copySec; };
+    std::vector<BwResult> results(static_cast<size_t>(threads), {0.0, 0.0, 0.0});
+    auto worker = [&](int index)
+    {
+        size_t chunk = bytes / static_cast<size_t>(threads);
+        size_t offset = chunk * static_cast<size_t>(index);
+        unsigned char* src = buffer + offset;
+        unsigned char* dst = copyBuffer + offset;
+        auto t0 = std::chrono::steady_clock::now();
+        memset(src, 0x5A, chunk);
+        auto t1 = std::chrono::steady_clock::now();
+        const unsigned long long* words = reinterpret_cast<const unsigned long long*>(src);
+        size_t wordCount = chunk / sizeof(unsigned long long);
+        unsigned long long sum = 0;
+        for (size_t i = 0; i < wordCount; ++i) sum += words[i];
+        volatile unsigned long long sink = sum;
+        (void)sink;
+        auto t2 = std::chrono::steady_clock::now();
+        memcpy(dst, src, chunk);
+        auto t3 = std::chrono::steady_clock::now();
+        results[static_cast<size_t>(index)].writeSec = std::chrono::duration<double>(t1 - t0).count();
+        results[static_cast<size_t>(index)].readSec = std::chrono::duration<double>(t2 - t1).count();
+        results[static_cast<size_t>(index)].copySec = std::chrono::duration<double>(t3 - t2).count();
+    };
+
+    const int rounds = 3;
+    double bestWrite = 0.0, bestRead = 0.0, bestCopy = 0.0;
+    for (int r = 0; r < rounds; ++r)
+    {
+        std::vector<std::thread> workers;
+        for (int i = 0; i < threads; ++i) workers.emplace_back(worker, i);
+        for (auto& t : workers) t.join();
+        double wSec = 0.0, rSec = 0.0, cSec = 0.0;
+        for (const auto& res : results)
+        {
+            wSec = res.writeSec > wSec ? res.writeSec : wSec; // 并行取最慢线程
+            rSec = res.readSec > rSec ? res.readSec : rSec;
+            cSec = res.copySec > cSec ? res.copySec : cSec;
+        }
+        double gb = static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
+        if (wSec > 0 && gb / wSec > bestWrite) bestWrite = gb / wSec;
+        if (rSec > 0 && gb / rSec > bestRead) bestRead = gb / rSec;
+        if (cSec > 0 && gb / cSec > bestCopy) bestCopy = gb / cSec;
+    }
+
+    delete[] buffer;
+    delete[] copyBuffer;
+    writeGBs = bestWrite;
+    readGBs = bestRead;
+    copyGBs = bestCopy;
+    return true;
+}
+
+// 内存带宽测试入口（AI 算力菜单使用）
+void MemoryBandwidthMenu()
+{
+    ClearScreen();
+    std::cout << "========== 内存带宽测试 ==========\n";
+    unsigned hw = std::thread::hardware_concurrency();
+    std::cout << "检测到逻辑核心数: " << hw << "\n";
+    int sizeMB = GetIntInput("请输入测试内存大小（MB，建议 512-4096）: ", 2048);
+    if (sizeMB <= 0) { std::cout << "大小无效！" << std::endl; Pause(); return; }
+    int threads = GetIntInput("请输入并行线程数（0=全部逻辑核心）: ", 0);
+
+    std::cout << "\n正在测量内存带宽（写入/读取/复制各 3 轮取最佳）...\n";
+    double writeGBs = 0.0, readGBs = 0.0, copyGBs = 0.0;
+    if (!MeasureMemoryBandwidth(static_cast<size_t>(sizeMB) * 1024 * 1024, threads, writeGBs, readGBs, copyGBs))
+    {
+        std::cout << "内存分配失败，请减小测试大小。" << std::endl;
+        Pause();
+        return;
+    }
+    std::cout << std::fixed << std::setprecision(2);
+    std::cout << "\n===== 内存带宽测试结果 =====\n";
+    std::cout << "写入带宽: " << writeGBs << " GB/s\n";
+    std::cout << "读取带宽: " << readGBs << " GB/s\n";
+    std::cout << "复制带宽: " << copyGBs << " GB/s\n";
+    Pause();
+}
+
+// ==================== 内存压力测试（完整版） ====================
+// 多种位图案全量写入校验 + 读/写/复制带宽测量
+void MemoryStressTest()
+{
+    ClearScreen();
+    std::cout << "========== 内存压力测试 ==========\n";
+    MEMORYSTATUSEX statex;
+    statex.dwLength = sizeof(statex);
+    GlobalMemoryStatusEx(&statex);
+    unsigned long long totalPhysMB = statex.ullTotalPhys / (1024 * 1024);
+    unsigned long long availPhysMB = statex.ullAvailPhys / (1024 * 1024);
+    std::cout << "物理内存总量: " << totalPhysMB << " MB，可用: " << availPhysMB << " MB\n";
+
+    std::cout << "\n请选择测试项目：\n";
+    std::cout << " 1. 数据完整性检测（7 种图案全量逐字节校验）\n";
+    std::cout << " 2. 内存带宽测试（写入/读取/复制，多线程）\n";
+    std::cout << " 3. 完整测试（先校验再测带宽）\n";
+    std::cout << " 0. 取消\n";
+    int mode = GetIntInput("请选择: ");
+    if (mode <= 0 || mode > 3) { std::cout << "操作已取消。" << std::endl; Pause(); return; }
+
+    if (mode == 2 || mode == 3)
+    {
+        MemoryBandwidthMenu();
+        if (mode == 2) return;
+    }
+
+    // 数据完整性检测
+    ClearScreen();
+    std::cout << "========== 内存数据完整性检测 ==========\n";
+    std::cout << "物理内存总量: " << totalPhysMB << " MB，可用: " << availPhysMB << " MB\n";
+    int allocSizeMB = GetIntInput("\n请输入要分配的内存大小（MB，建议不超过可用内存的80%）: ");
+    if (allocSizeMB <= 0) { std::cout << "大小无效！" << std::endl; Pause(); return; }
+    if (static_cast<unsigned long long>(allocSizeMB) > availPhysMB * 0.8)
+    {
+        std::cout << "警告：分配大小接近或超过可用内存，可能导致系统无响应。\n";
+        std::cout << "是否仍要继续？(y/n): ";
+        char c; std::cin >> c; std::cin.ignore();
+        if (c != 'y' && c != 'Y') { std::cout << "操作已取消。" << std::endl; Pause(); return; }
+    }
+
+    size_t totalBytes = static_cast<size_t>(allocSizeMB) * 1024 * 1024;
+    std::cout << "\n正在分配 " << allocSizeMB << " MB 内存...\n";
+    unsigned char* buffer = nullptr;
+    try
+    {
+        buffer = new unsigned char[totalBytes];
+    }
+    catch (std::bad_alloc&)
+    {
+        std::cout << "内存分配失败！" << std::endl;
+        Pause();
+        return;
+    }
+
+    const char* patternNames[] = { "全 0 (0x00)", "全 1 (0xFF)", "交替 1010 (0xAA)",
+        "交替 0101 (0x55)", "棋盘 A5 (0xA5)", "棋盘 5A (0x5A)", "随机数据" };
+    bool integrityPass = true;
+    size_t errorOffset = 0;
+    int failedPattern = -1;
+    auto startAll = std::chrono::steady_clock::now();
+    std::cout << "开始全量校验（写入并逐字节核对，共 7 种图案）...\n\n";
+
+    // 固定图案：写入后与预期块逐段 memcmp，出错时定位第一个错误字节
+    size_t chunkSize = totalBytes < 1024 * 1024 ? totalBytes : 1024 * 1024;
+    std::vector<unsigned char> expected(chunkSize);
+    for (int p = 0; p < 6 && integrityPass; ++p)
+    {
+        unsigned char pattern = 0;
+        switch (p)
+        {
+            case 0: pattern = 0x00; break;
+            case 1: pattern = 0xFF; break;
+            case 2: pattern = 0xAA; break;
+            case 3: pattern = 0x55; break;
+            case 4: pattern = 0xA5; break;
+            case 5: pattern = 0x5A; break;
+        }
+        auto roundStart = std::chrono::steady_clock::now();
+        memset(expected.data(), pattern, chunkSize);
+        memset(buffer, pattern, totalBytes);
+        for (size_t off = 0; off < totalBytes; off += chunkSize)
+        {
+            size_t chunk = off + chunkSize <= totalBytes ? chunkSize : totalBytes - off;
+            if (memcmp(buffer + off, expected.data(), chunk) != 0)
+            {
+                for (size_t i = 0; i < chunk; ++i)
+                {
+                    if (buffer[off + i] != pattern) { errorOffset = off + i; break; }
+                }
+                integrityPass = false;
+                failedPattern = p;
+            }
+        }
+        double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - roundStart).count();
+        std::cout << "图案 " << patternNames[p] << ": " << (integrityPass ? "通过" : "失败")
+                  << "，耗时 " << std::fixed << std::setprecision(2) << sec << " 秒\n";
+    }
+
+    // 随机数据图案：逐块生成随机数据、写入并立即校验
+    if (integrityPass)
+    {
+        auto roundStart = std::chrono::steady_clock::now();
+        srand(static_cast<unsigned>(time(nullptr)));
+        for (size_t off = 0; off < totalBytes && integrityPass; off += chunkSize)
+        {
+            size_t chunk = off + chunkSize <= totalBytes ? chunkSize : totalBytes - off;
+            for (size_t i = 0; i < chunk; ++i) expected[i] = static_cast<unsigned char>(rand() & 0xFF);
+            memcpy(buffer + off, expected.data(), chunk);
+            if (memcmp(buffer + off, expected.data(), chunk) != 0)
+            {
+                integrityPass = false;
+                failedPattern = 6;
+                errorOffset = off;
+            }
+        }
+        double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - roundStart).count();
+        std::cout << "图案 " << patternNames[6] << ": " << (integrityPass ? "通过" : "失败")
+                  << "，耗时 " << sec << " 秒\n";
+    }
+
+    double elapsedAll = std::chrono::duration<double>(std::chrono::steady_clock::now() - startAll).count();
+    delete[] buffer;
+
+    std::cout << "\n===== 数据完整性检测结果 =====" << std::endl;
+    if (integrityPass)
+        std::cout << "内存数据完整性检测通过，7 种图案全部一致，总耗时 "
+                  << std::fixed << std::setprecision(1) << elapsedAll << " 秒。" << std::endl;
+    else
+        std::cout << "内存数据完整性检测失败！图案 " << patternNames[failedPattern]
+                  << " 校验不一致，首个错误字节偏移: 0x" << std::hex << errorOffset << std::dec
+                  << "（可能是内存条硬件故障，建议用 MemTest86 进一步检测）" << std::endl;
+    Pause();
+}
+
+// GPU 压力测试子菜单（压测菜单入口）
+void GpuStressSubMenu()
+{
+    while (true)
+    {
+        ClearScreen();
+        std::cout << "========== GPU 压力测试 ==========\n";
+        std::cout << " 1. DirectX 11 渲染压测（真实着色器负载）\n";
+        std::cout << " 2. OpenGL 渲染压测\n";
+        std::cout << " 3. 多窗口并发压测\n";
+        std::cout << " 0. 返回上级\n";
+        std::cout << "==================================\n";
+        int choice = GetIntInput("请选择: ");
+        if (choice == 0) break;
+        else if (choice == 1) DirectX11Test();
+        else if (choice == 2) OpenGLTest();
+        else if (choice == 3) GpuMultiWindowTest();
+        else { std::cout << "无效选项。" << std::endl; Pause(); }
+    }
+}
+
+// ==================== CPU AI 算力测试 ====================
+// FP32 矩阵乘法测 GFLOPS（单核 + 多核），INT8 乘加测整数推理速率
+void CpuAiBenchmark()
+{
+    ClearScreen();
+    std::cout << "========== CPU AI 算力测试 ==========\n";
+    unsigned hwThreads = std::thread::hardware_concurrency();
+    std::cout << "检测到 CPU 逻辑核心数: " << hwThreads << "\n\n";
+
+    std::cout << "请选择矩阵规模（FP32 矩阵乘法 C = A × B）：\n";
+    std::cout << " 1. 快速（512×512，约 0.27 GFLOP）\n";
+    std::cout << " 2. 标准（768×768，约 0.9 GFLOP）\n";
+    std::cout << " 3. 重度（1024×1024，约 2.1 GFLOP）\n";
+    std::cout << " 0. 取消\n";
+    int scale = GetIntInput("请选择: ");
+    if (scale <= 0 || scale > 3) { std::cout << "操作已取消。" << std::endl; Pause(); return; }
+    int n = scale == 1 ? 512 : (scale == 2 ? 768 : 1024);
+    double totalFlops = 2.0 * n * n * n;
+
+    std::vector<float> a(static_cast<size_t>(n) * n);
+    std::vector<float> b(static_cast<size_t>(n) * n);
+    std::vector<float> c(static_cast<size_t>(n) * n);
+    for (size_t i = 0; i < a.size(); ++i)
+    {
+        a[i] = static_cast<float>((i % 97) - 48) * 0.01f;
+        b[i] = static_cast<float>((i % 89) - 44) * 0.01f;
+        c[i] = 0.0f;
+    }
+
+    // 单核成绩
+    std::cout << "\n单核 FP32 计算中...\n";
+    auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < n; ++i)
+        for (int k = 0; k < n; ++k)
+        {
+            float av = a[static_cast<size_t>(i) * n + k];
+            const float* brow = &b[static_cast<size_t>(k) * n];
+            float* crow = &c[static_cast<size_t>(i) * n];
+            for (int j = 0; j < n; ++j) crow[j] += av * brow[j];
+        }
+    double singleSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    // 多核成绩（按行分片）
+    int threadCount = hwThreads ? static_cast<int>(hwThreads) : 4;
+    std::cout << "多核（" << threadCount << " 线程）FP32 计算中...\n";
+    std::atomic<int> nextRow{0};
+    start = std::chrono::steady_clock::now();
+    std::vector<std::thread> workers;
+    for (int t = 0; t < threadCount; ++t)
+    {
+        workers.emplace_back([&]()
+        {
+            for (;;)
+            {
+                int i = nextRow.fetch_add(1);
+                if (i >= n) break;
+                for (int k = 0; k < n; ++k)
+                {
+                    float av = a[static_cast<size_t>(i) * n + k];
+                    const float* brow = &b[static_cast<size_t>(k) * n];
+                    float* crow = &c[static_cast<size_t>(i) * n];
+                    for (int j = 0; j < n; ++j) crow[j] += av * brow[j];
+                }
+            }
+        });
+    }
+    for (auto& t : workers) t.join();
+    double multiSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    // 结果校验（输出应为有限数值）
+    bool resultsValid = true;
+    for (size_t i = 0; i < c.size(); ++i)
+        if (!std::isfinite(c[i])) { resultsValid = false; break; }
+
+    // INT8 乘加速率（模拟量化模型推理的整数乘加）
+    std::cout << "INT8 乘加测试中...\n";
+    const size_t int8Count = 1ull << 26; // 每轮 64M 次乘加
+    std::vector<signed char> ia(int8Count), ib(int8Count);
+    for (size_t i = 0; i < int8Count; ++i)
+    {
+        ia[i] = static_cast<signed char>((i % 127) - 64);
+        ib[i] = static_cast<signed char>((i * 7 % 127) - 64);
+    }
+    int int8Rounds = 4;
+    auto int8Start = std::chrono::steady_clock::now();
+    long long int8Checksum = 0;
+    for (int r = 0; r < int8Rounds; ++r)
+    {
+        nextRow = 0;
+        int chunks = threadCount;
+        size_t chunkSize = int8Count / static_cast<size_t>(chunks);
+        workers.clear();
+        for (int t = 0; t < chunks; ++t)
+        {
+            workers.emplace_back([&, t]()
+            {
+                size_t begin = chunkSize * static_cast<size_t>(t);
+                size_t end = t == chunks - 1 ? int8Count : begin + chunkSize;
+                long long local = 0;
+                for (size_t i = begin; i < end; ++i)
+                    local += static_cast<int>(ia[i]) * static_cast<int>(ib[i]);
+                int8Checksum += local;
+            });
+        }
+        for (auto& t : workers) t.join();
+    }
+    double int8Sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - int8Start).count();
+    double int8Ops = static_cast<double>(int8Count) * int8Rounds * 2.0;
+    volatile long long int8Sink = int8Checksum;
+    (void)int8Sink;
+
+    double singleGflops = totalFlops / singleSec / 1e9;
+    double multiGflops = totalFlops / multiSec / 1e9;
+    double speedup = multiSec > 0 ? singleSec / multiSec : 0.0;
+    double int8Giops = int8Ops / int8Sec / 1e9;
+
+    std::cout << "\n===== CPU AI 算力测试结果 =====\n";
+    std::cout << "FP32 矩阵乘法（" << n << "×" << n << "）:\n";
+    std::cout << "  单核: " << std::fixed << std::setprecision(2) << singleGflops
+              << " GFLOPS（耗时 " << singleSec << " 秒）\n";
+    std::cout << "  多核: " << multiGflops
+              << " GFLOPS（耗时 " << multiSec << " 秒，加速比 " << speedup << "×）\n";
+    std::cout << "INT8 乘加速率: " << int8Giops << " GIOPS（每秒十亿次乘加）\n";
+    std::cout << "计算结果校验: " << (resultsValid ? "通过" : "数值异常，成绩仅供参考") << "\n";
+    Pause();
+}
+
+// ==================== AI 算力测试菜单 ====================
+void AiComputeMenu()
+{
+    while (true)
+    {
+        ClearScreen();
+        std::cout << "========== AI 算力测试 ==========\n";
+        std::cout << "在本机测量 CPU/GPU 的 AI 训练与推理相关理论算力，成绩仅供参考。\n\n";
+        std::cout << " 1. CPU 算力测试（FP32 GFLOPS + INT8 速率）\n";
+        std::cout << " 2. GPU 算力测试（DirectX 11 Compute GFLOPS）\n";
+        std::cout << " 3. 内存带宽测试（GB/s）\n";
+        std::cout << " 4. 综合跑分（依次完成以上全部测试）\n";
+        std::cout << " 0. 返回主菜单\n";
+        std::cout << "=================================\n";
+        int choice = GetIntInput("请选择: ");
+        if (choice == 0) break;
+        else if (choice == 1) CpuAiBenchmark();
+        else if (choice == 2) GpuAiComputeTest();
+        else if (choice == 3) MemoryBandwidthMenu();
+        else if (choice == 4)
+        {
+            CpuAiBenchmark();
+            GpuAiComputeTest();
+            MemoryBandwidthMenu();
+        }
+        else { std::cout << "无效选项。" << std::endl; Pause(); }
+    }
+}
+
 // ==================== 10. 硬件压力测试 ====================
 void StressTestMenu()
 {
@@ -2156,8 +2657,9 @@ void StressTestMenu()
         ClearScreen();
         std::cout << "========== 硬件压力测试 ==========\n";
         std::cout << " 1. 硬盘压力测试\n";
-        std::cout << " 2. 内存压力测试\n";
+        std::cout << " 2. 内存压力测试（图案校验+带宽，完整版）\n";
         std::cout << " 3. CPU 压力测试\n";
+        std::cout << " 4. GPU 压力测试（DirectX 11/OpenGL/多窗口）\n";
         std::cout << " 5. 网络（网卡）压力测试\n";
         std::cout << " 6. 电脑接口通道压测\n";
         std::cout << " 7. 返回主菜单\n";
@@ -2248,64 +2750,12 @@ void StressTestMenu()
         // ========== 2. 内存压力测试 ==========
         else if (choice == 2)
         {
-            ClearScreen();
-            std::cout << "========== 内存压力测试 ==========\n";
-            MEMORYSTATUSEX statex;
-            statex.dwLength = sizeof(statex);
-            GlobalMemoryStatusEx(&statex);
-            unsigned long long totalPhysMB = statex.ullTotalPhys / (1024 * 1024);
-            unsigned long long availPhysMB = statex.ullAvailPhys / (1024 * 1024);
-            std::cout << "物理内存总量: " << totalPhysMB << " MB，可用: " << availPhysMB << " MB" << std::endl;
-
-            int allocSizeMB = GetIntInput("请输入要分配的内存大小（MB，建议不超过可用内存的80%）: ");
-            if (allocSizeMB <= 0) { std::cout << "大小无效！" << std::endl; Pause(); continue; }
-            if (static_cast<unsigned long long>(allocSizeMB) > availPhysMB * 0.8)
-            {
-                std::cout << "警告：分配大小接近或超过可用内存，可能导致系统无响应。" << std::endl;
-                std::cout << "是否仍要继续？(y/n): ";
-                char c; std::cin >> c; std::cin.ignore();
-                if (c != 'y' && c != 'Y') { std::cout << "操作已取消。" << std::endl; Pause(); continue; }
-            }
-
-            std::cout << "\n正在分配 " << allocSizeMB << " MB 内存...\n";
-            size_t totalBytes = static_cast<size_t>(allocSizeMB) * 1024 * 1024;
-            char* buffer = nullptr;
-            try
-            {
-                buffer = new char[totalBytes];
-            }
-            catch (std::bad_alloc&)
-            {
-                std::cout << "内存分配失败！" << std::endl;
-                Pause();
-                continue;
-            }
-
-            std::cout << "内存分配成功，开始压力测试（反复写入并校验）...\n";
-            memset(buffer, 0xA5, totalBytes);
-            const int rounds = 5;
-            bool memOk = true;
-            auto start = std::chrono::steady_clock::now();
-            for (int r = 0; r < rounds; ++r)
-            {
-                char pattern = (r % 2 == 0) ? 0xA5 : 0x5A;
-                memset(buffer, pattern, totalBytes);
-                for (size_t off = 0; off < totalBytes; off += 1024 * 1024)
-                {
-                    if (buffer[off] != pattern) { memOk = false; break; }
-                }
-                if (!memOk) break;
-            }
-            auto end = std::chrono::steady_clock::now();
-            double elapsed = std::chrono::duration<double>(end - start).count();
-
-            delete[] buffer;
-            std::cout << "\n===== 测试结果 =====" << std::endl;
-            if (memOk)
-                std::cout << "内存压力测试通过，耗时: " << elapsed << " 秒" << std::endl;
-            else
-                std::cout << "内存压力测试失败，检测到数据错误！" << std::endl;
-            Pause();
+            MemoryStressTest();
+        }
+        // ========== 4. GPU 压力测试 ==========
+        else if (choice == 4)
+        {
+            GpuStressSubMenu();
         }
         // ========== 3. CPU 压力测试 ==========
         else if (choice == 3)
@@ -6420,6 +6870,19 @@ void OpenGLTest()
     DestroyWindow(hwnd);
     Pause();
 }
+// 动态加载 d3dcompiler_47.dll 在内存中编译 HLSL，免去额外链接依赖（Win10/11 系统自带）
+HRESULT CompileHlslFromMemory(const char* source, const char* entryPoint, const char* target,
+                              ID3DBlob** blob, ID3DBlob** errors)
+{
+    typedef HRESULT(WINAPI * PFN_D3DCompile)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*,
+        ID3DInclude*, LPCSTR, LPCSTR, UINT, UINT, ID3DBlob**, ID3DBlob**);
+    static HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
+    static PFN_D3DCompile proc = compiler ?
+        reinterpret_cast<PFN_D3DCompile>(GetProcAddress(compiler, "D3DCompile")) : nullptr;
+    if (!proc) return E_FAIL;
+    return proc(source, strlen(source), nullptr, nullptr, nullptr, entryPoint, target, 0, 0, blob, errors);
+}
+
 // DirectX 11 测试（真正 GPU 负载版）
 void DirectX11Test()
 {
@@ -6452,7 +6915,17 @@ void DirectX11Test()
         CW_USEDEFAULT, CW_USEDEFAULT, 1920, 1080, NULL, NULL, wc.hInstance, NULL);
     
     if (!hwnd) { std::cout << "窗口创建失败！" << std::endl; Pause(); return; }
-    
+
+    // 按实际客户区大小创建交换链，避免画面拉伸变形
+    RECT clientRect{};
+    if (!GetClientRect(hwnd, &clientRect) || clientRect.right <= 0 || clientRect.bottom <= 0)
+    {
+        clientRect.right = 1920;
+        clientRect.bottom = 1080;
+    }
+    UINT texWidth = static_cast<UINT>(clientRect.right);
+    UINT texHeight = static_cast<UINT>(clientRect.bottom);
+
     // 创建 D3D11 设备
     D3D_FEATURE_LEVEL featureLevel;
     ID3D11Device* pDevice = nullptr;
@@ -6462,8 +6935,8 @@ void DirectX11Test()
     
     DXGI_SWAP_CHAIN_DESC swapChainDesc = {};
     swapChainDesc.BufferCount = 2;
-    swapChainDesc.BufferDesc.Width = 1920;
-    swapChainDesc.BufferDesc.Height = 1080;
+    swapChainDesc.BufferDesc.Width = texWidth;
+    swapChainDesc.BufferDesc.Height = texHeight;
     swapChainDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     swapChainDesc.BufferDesc.RefreshRate.Numerator = 60;
     swapChainDesc.BufferDesc.RefreshRate.Denominator = 1;
@@ -6508,8 +6981,8 @@ void DirectX11Test()
     ID3D11Texture2D* pDepthBuffer = nullptr;
     ID3D11DepthStencilView* pDepthStencilView = nullptr;
     D3D11_TEXTURE2D_DESC depthDesc = {};
-    depthDesc.Width = 1920;
-    depthDesc.Height = 1080;
+    depthDesc.Width = texWidth;
+    depthDesc.Height = texHeight;
     depthDesc.MipLevels = 1;
     depthDesc.ArraySize = 1;
     depthDesc.Format = DXGI_FORMAT_D32_FLOAT;
@@ -6523,8 +6996,8 @@ void DirectX11Test()
     
     // 设置视口
     D3D11_VIEWPORT viewport = {};
-    viewport.Width = 1920.0f;
-    viewport.Height = 1080.0f;
+    viewport.Width = static_cast<float>(texWidth);
+    viewport.Height = static_cast<float>(texHeight);
     viewport.MinDepth = 0.0f;
     viewport.MaxDepth = 1.0f;
     pContext->RSSetViewports(1, &viewport);
@@ -6573,22 +7046,86 @@ void DirectX11Test()
     pContext->IASetVertexBuffers(0, 1, &pVertexBuffer, &stride, &offset);
     pContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     
-    // 创建着色器
-    const char* vsSource = 
-        "float4 main(float4 pos : POSITION, float4 color : COLOR) : SV_POSITION { return pos; }";
-    const char* psSource = 
+    // 创建着色器（真正编译并绑定到管线，配合顶点旋转动画形成实际 GPU 负载）
+    const char* vsSource =
+        "cbuffer AnimCB : register(b0) { float g_time; float3 g_pad; }; "
+        "float4 main(float3 pos : POSITION, float4 color : COLOR) : SV_POSITION { "
+        "float s = sin(g_time); float c = cos(g_time); "
+        "return float4(pos.x * c - pos.y * s, pos.x * s + pos.y * c, pos.z, 1.0f); }";
+    const char* psSource =
         "float4 main(float4 pos : SV_POSITION, float4 color : COLOR) : SV_Target { return color; }";
-    
+
     ID3D11VertexShader* pVS = nullptr;
     ID3D11PixelShader* pPS = nullptr;
     ID3D11InputLayout* pInputLayout = nullptr;
-    
+
     ID3DBlob* pVSBlob = nullptr;
     ID3DBlob* pPSBlob = nullptr;
-    
-    // 编译着色器（简化版，直接用预编译的）
-    // 这里使用简单方法：直接创建着色器
-    
+    ID3DBlob* pErrorBlob = nullptr;
+    ID3D11Buffer* pAnimCB = nullptr;
+
+    // 统一清理（正常结束与中途失败共用）
+    auto cleanupTest = [&]() {
+        if (pAnimCB) pAnimCB->Release();
+        if (pVSBlob) pVSBlob->Release();
+        if (pPSBlob) pPSBlob->Release();
+        if (pErrorBlob) pErrorBlob->Release();
+        if (pVS) pVS->Release();
+        if (pPS) pPS->Release();
+        if (pInputLayout) pInputLayout->Release();
+        if (pVertexBuffer) pVertexBuffer->Release();
+        if (pDepthStencilView) pDepthStencilView->Release();
+        if (pDepthBuffer) pDepthBuffer->Release();
+        if (pRenderTargetView) pRenderTargetView->Release();
+        if (pSwapChain) pSwapChain->Release();
+        if (pContext) pContext->Release();
+        if (pDevice) pDevice->Release();
+        DestroyWindow(hwnd);
+    };
+
+    if (FAILED(CompileHlslFromMemory(vsSource, "main", "vs_5_0", &pVSBlob, &pErrorBlob)))
+    {
+        if (pErrorBlob)
+            std::cout << "编译顶点着色器失败: " << static_cast<const char*>(pErrorBlob->GetBufferPointer()) << std::endl;
+        else
+            std::cout << "编译顶点着色器失败：系统缺少 d3dcompiler_47.dll。" << std::endl;
+        cleanupTest();
+        Pause();
+        return;
+    }
+    D3D11_INPUT_ELEMENT_DESC inputLayoutDesc[] =
+    {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0}
+    };
+    bool shaderOk = SUCCEEDED(pDevice->CreateInputLayout(inputLayoutDesc, 2,
+        pVSBlob->GetBufferPointer(), pVSBlob->GetBufferSize(), &pInputLayout))
+        && SUCCEEDED(pDevice->CreateVertexShader(pVSBlob->GetBufferPointer(), pVSBlob->GetBufferSize(), nullptr, &pVS));
+    pVSBlob->Release();
+    pVSBlob = nullptr;
+    if (shaderOk)
+        shaderOk = SUCCEEDED(CompileHlslFromMemory(psSource, "main", "ps_5_0", &pPSBlob, &pErrorBlob))
+            && pPSBlob && SUCCEEDED(pDevice->CreatePixelShader(pPSBlob->GetBufferPointer(), pPSBlob->GetBufferSize(), nullptr, &pPS));
+    if (pPSBlob) { pPSBlob->Release(); pPSBlob = nullptr; }
+    if (pErrorBlob) { pErrorBlob->Release(); pErrorBlob = nullptr; }
+    D3D11_BUFFER_DESC animDesc = {};
+    animDesc.ByteWidth = 16;
+    animDesc.Usage = D3D11_USAGE_DYNAMIC;
+    animDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    animDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    shaderOk = shaderOk && SUCCEEDED(pDevice->CreateBuffer(&animDesc, nullptr, &pAnimCB));
+    if (!shaderOk)
+    {
+        std::cout << "创建着色器资源失败，无法开始压测。" << std::endl;
+        cleanupTest();
+        Pause();
+        return;
+    }
+    pContext->IASetInputLayout(pInputLayout);
+    pContext->VSSetShader(pVS, nullptr, 0);
+    pContext->PSSetShader(pPS, nullptr, 0);
+    pContext->VSSetConstantBuffers(0, 1, &pAnimCB);
+
     ShowWindow(hwnd, SW_SHOW);
     
     std::cout << "GPU 压测进行中... 顶点数: " << vertexCount << "\n";
@@ -6603,13 +7140,34 @@ void DirectX11Test()
         float clearColor[4] = { 0.1f, 0.1f, 0.2f, 1.0f };
         pContext->ClearRenderTargetView(pRenderTargetView, clearColor);
         pContext->ClearDepthStencilView(pDepthStencilView, D3D11_CLEAR_DEPTH, 1.0f, 0);
-        
+
+        // 更新顶点旋转动画的时间常量
+        D3D11_MAPPED_SUBRESOURCE animMapped{};
+        if (SUCCEEDED(pContext->Map(pAnimCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &animMapped)))
+        {
+            float timeVal = static_cast<float>(std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+            memcpy(animMapped.pData, &timeVal, sizeof(float));
+            pContext->Unmap(pAnimCB, 0);
+        }
+
         // 绘制所有顶点
         pContext->Draw(vertexCount, 0);
-        
-        // 呈现
-        pSwapChain->Present(1, 0);
+
+        // 呈现（关闭垂直同步，测出真实 GPU 帧率）
+        pSwapChain->Present(0, 0);
         frameCount++;
+
+        // 每 30 帧把实时 FPS 显示到窗口标题
+        if (frameCount % 30 == 0)
+        {
+            double sofar = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            if (sofar > 0.0)
+            {
+                wchar_t titleText[96];
+                swprintf(titleText, 96, L"DirectX 11 GPU Test - FPS: %.1f", frameCount / sofar);
+                SetWindowTextW(hwnd, titleText);
+            }
+        }
         
         // 处理消息
         MSG msg;
@@ -6639,18 +7197,229 @@ void DirectX11Test()
     std::cout << "持续时间: " << std::fixed << std::setprecision(1) << elapsed << " 秒\n";
     std::cout << "帧数: " << frameCount << "\n";
     std::cout << "FPS: " << std::fixed << std::setprecision(2) << fps << "\n";
-    
+    std::cout << "每帧处理顶点: " << vertexCount << "（三角形 " << vertexCount / 3 << "）\n";
+
     // 清理
-    if (pVertexBuffer) pVertexBuffer->Release();
-    if (pDepthStencilView) pDepthStencilView->Release();
-    if (pDepthBuffer) pDepthBuffer->Release();
-    if (pRenderTargetView) pRenderTargetView->Release();
-    if (pSwapChain) pSwapChain->Release();
-    if (pContext) pContext->Release();
-    if (pDevice) pDevice->Release();
-    DestroyWindow(hwnd);
+    cleanupTest();
     Pause();
 }
+// ==================== GPU AI 算力测试（D3D11 Compute） ====================
+// 用计算着色器批量执行 FMA（乘加）运算，测算 GPU 单精度浮点算力（GFLOPS）
+void GpuAiComputeTest()
+{
+    ClearScreen();
+    std::cout << "========== GPU AI 算力测试（DirectX 11 Compute） ==========\n\n";
+
+    D3D_FEATURE_LEVEL featureLevel;
+    ID3D11Device* pDevice = nullptr;
+    ID3D11DeviceContext* pContext = nullptr;
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+        nullptr, 0, D3D11_SDK_VERSION, &pDevice, &featureLevel, &pContext);
+    if (FAILED(hr))
+    {
+        std::cout << "无法创建 D3D11 设备，可能没有可用的硬件 GPU 或驱动异常。\n";
+        Pause();
+        return;
+    }
+
+    // 显示 GPU 型号
+    IDXGIDevice* pDXGIDevice = nullptr;
+    if (SUCCEEDED(pDevice->QueryInterface(__uuidof(IDXGIDevice), (void**)&pDXGIDevice)))
+    {
+        IDXGIAdapter* pAdapter = nullptr;
+        if (SUCCEEDED(pDXGIDevice->GetAdapter(&pAdapter)))
+        {
+            DXGI_ADAPTER_DESC adapterDesc;
+            if (SUCCEEDED(pAdapter->GetDesc(&adapterDesc)))
+            {
+                std::wcout << L"GPU: " << adapterDesc.Description << L"\n";
+                std::cout << "显存: " << adapterDesc.DedicatedVideoMemory / (1024.0 * 1024.0) << " MB\n";
+            }
+            pAdapter->Release();
+        }
+        pDXGIDevice->Release();
+    }
+    std::cout << "特性等级: 0x" << std::hex << featureLevel << std::dec << "\n\n";
+
+    std::cout << "请选择测试规模：\n";
+    std::cout << " 1. 快速（65536 线程 × 20000 次迭代）\n";
+    std::cout << " 2. 标准（524288 线程 × 20000 次迭代）\n";
+    std::cout << " 3. 重度（2097152 线程 × 20000 次迭代）\n";
+    std::cout << " 0. 取消\n";
+    int scale = GetIntInput("请选择: ");
+    UINT groups = 0;
+    switch (scale)
+    {
+        case 1: groups = 256; break;     // 256 × 256 = 65536 线程
+        case 2: groups = 2048; break;    // 2048 × 256 = 524288 线程
+        case 3: groups = 8192; break;    // 8192 × 256 = 2097152 线程
+        default:
+            pContext->Release();
+            pDevice->Release();
+            Pause();
+            return;
+    }
+    const UINT kIterations = 20000;
+    const UINT kThreadsPerGroup = 256;
+    UINT totalThreads = groups * kThreadsPerGroup;
+    double totalFlops = static_cast<double>(totalThreads) * kIterations * 8.0; // 每次迭代 4 乘 + 4 加
+
+    std::cout << "\n计算规模: " << totalThreads << " 线程，每线程 " << kIterations
+              << " 次 FMA，总量 " << std::fixed << std::setprecision(1)
+              << totalFlops / 1e9 << " GFLOP\n\n";
+
+    // 计算着色器：每线程对 float4 反复做 a = a * b + c
+    const char* csSource =
+        "cbuffer ParamsCB : register(b0) { uint g_iterations; uint3 g_pad; }; "
+        "RWStructuredBuffer<float4> g_result : register(u0); "
+        "[numthreads(256,1,1)] "
+        "void main(uint3 tid : SV_DispatchThreadID) { "
+        "float4 a = float4(tid.x * 0.001f + 0.5f, 0.25f, 0.125f, 0.0625f); "
+        "float4 b = float4(0.999999f, 1.000001f, 0.9999f, 1.0001f); "
+        "float4 c = float4(0.5f, 0.25f, 0.125f, 0.0625f); "
+        "[loop] for (uint i = 0; i < g_iterations; ++i) { a = a * b + c; } "
+        "g_result[tid.x] = a; }";
+
+    ID3DBlob* pCSBlob = nullptr;
+    ID3DBlob* pErrorBlob = nullptr;
+    ID3D11ComputeShader* pComputeShader = nullptr;
+    ID3D11Buffer* pParamsCB = nullptr;
+    ID3D11Buffer* pResultBuffer = nullptr;
+    ID3D11Buffer* pStagingBuffer = nullptr;
+    ID3D11UnorderedAccessView* pResultUAV = nullptr;
+    bool ok = SUCCEEDED(CompileHlslFromMemory(csSource, "main", "cs_5_0", &pCSBlob, &pErrorBlob))
+        && pCSBlob && SUCCEEDED(pDevice->CreateComputeShader(pCSBlob->GetBufferPointer(),
+            pCSBlob->GetBufferSize(), nullptr, &pComputeShader));
+    if (pCSBlob) { pCSBlob->Release(); pCSBlob = nullptr; }
+    if (pErrorBlob)
+    {
+        std::cout << "编译计算着色器失败: " << static_cast<const char*>(pErrorBlob->GetBufferPointer()) << "\n";
+        pErrorBlob->Release();
+        pErrorBlob = nullptr;
+        ok = false;
+    }
+
+    D3D11_BUFFER_DESC bufDesc = {};
+    HRESULT stageHr = S_OK;
+    if (ok)
+    {
+        bufDesc.ByteWidth = 16; // uint 迭代次数 + 12 字节对齐
+        bufDesc.Usage = D3D11_USAGE_IMMUTABLE;
+        bufDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        UINT initData[4] = { kIterations, 0, 0, 0 };
+        D3D11_SUBRESOURCE_DATA initRes = {};
+        initRes.pSysMem = initData;
+        stageHr = pDevice->CreateBuffer(&bufDesc, &initRes, &pParamsCB);
+        ok = SUCCEEDED(stageHr);
+    }
+    if (ok)
+    {
+        bufDesc.ByteWidth = totalThreads * 16;
+        bufDesc.Usage = D3D11_USAGE_DEFAULT;
+        bufDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        bufDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        bufDesc.StructureByteStride = 16;
+        stageHr = pDevice->CreateBuffer(&bufDesc, nullptr, &pResultBuffer);
+        ok = SUCCEEDED(stageHr);
+    }
+    if (ok)
+    {
+        bufDesc.Usage = D3D11_USAGE_STAGING;
+        bufDesc.BindFlags = 0;
+        bufDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        bufDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        stageHr = pDevice->CreateBuffer(&bufDesc, nullptr, &pStagingBuffer);
+        ok = SUCCEEDED(stageHr);
+    }
+    if (ok)
+    {
+        D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+        uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+        uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        uavDesc.Buffer.FirstElement = 0;
+        uavDesc.Buffer.NumElements = totalThreads;
+        stageHr = pDevice->CreateUnorderedAccessView(pResultBuffer, &uavDesc, &pResultUAV);
+        ok = SUCCEEDED(stageHr);
+    }
+    if (!ok)
+    {
+        std::cout << "创建计算资源失败（HRESULT: 0x" << std::hex << stageHr
+                  << std::dec << "），测试中止。\n";
+        if (pResultUAV) pResultUAV->Release();
+        if (pStagingBuffer) pStagingBuffer->Release();
+        if (pResultBuffer) pResultBuffer->Release();
+        if (pParamsCB) pParamsCB->Release();
+        if (pComputeShader) pComputeShader->Release();
+        pContext->Release();
+        pDevice->Release();
+        Pause();
+        return;
+    }
+
+    pContext->CSSetShader(pComputeShader, nullptr, 0);
+    pContext->CSSetConstantBuffers(0, 1, &pParamsCB);
+    pContext->CSSetUnorderedAccessViews(0, 1, &pResultUAV, nullptr);
+
+    // 预热一轮（驱动 JIT 与着色器编译缓存），不计入成绩
+    std::cout << "预热中...\n";
+    pContext->Dispatch(groups, 1, 1);
+    pContext->CopyResource(pStagingBuffer, pResultBuffer);
+    D3D11_MAPPED_SUBRESOURCE warmMapped{};
+    if (SUCCEEDED(pContext->Map(pStagingBuffer, 0, D3D11_MAP_READ, 0, &warmMapped)))
+        pContext->Unmap(pStagingBuffer, 0);
+
+    const int passes = 3;
+    double totalTime = 0.0;
+    double bestTime = 0.0;
+    bool computeVerified = false;
+    for (int pass = 0; pass < passes; ++pass)
+    {
+        auto passStart = std::chrono::steady_clock::now();
+        pContext->Dispatch(groups, 1, 1);
+        pContext->CopyResource(pStagingBuffer, pResultBuffer);
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (SUCCEEDED(pContext->Map(pStagingBuffer, 0, D3D11_MAP_READ, 0, &mapped)))
+        {
+            // 校验结果有效（有限数值），证明 GPU 确实完成了计算
+            const float* values = static_cast<const float*>(mapped.pData);
+            float vx = values[0], vy = values[totalThreads - 1];
+            if (std::isfinite(vx) && std::isfinite(vy)) computeVerified = true;
+            pContext->Unmap(pStagingBuffer, 0);
+        }
+        auto passEnd = std::chrono::steady_clock::now();
+        double t = std::chrono::duration<double>(passEnd - passStart).count();
+        totalTime += t;
+        if (pass == 0 || t < bestTime) bestTime = t;
+        std::cout << "第 " << pass + 1 << " 轮: " << std::fixed << std::setprecision(3)
+                  << t << " 秒（" << totalFlops / t / 1e9 << " GFLOPS）\n";
+    }
+
+    // 解绑 UAV 后再清理资源
+    ID3D11UnorderedAccessView* nullUAV = nullptr;
+    pContext->CSSetUnorderedAccessViews(0, 1, &nullUAV, nullptr);
+
+    double avgTime = totalTime / passes;
+    double avgGflops = totalFlops / avgTime / 1e9;
+    double bestGflops = totalFlops / bestTime / 1e9;
+
+    std::cout << "\n===== GPU AI 算力测试结果 =====\n";
+    std::cout << "平均算力: " << std::fixed << std::setprecision(2) << avgGflops << " GFLOPS\n";
+    std::cout << "最佳算力: " << bestGflops << " GFLOPS（约 " << bestGflops / 1000.0 << " TFLOPS）\n";
+    if (computeVerified)
+        std::cout << "计算结果校验: 通过（GPU 输出为有效数值）\n";
+    else
+        std::cout << "计算结果校验: 未能读取有效输出，成绩仅供参考。\n";
+
+    if (pResultUAV) pResultUAV->Release();
+    if (pStagingBuffer) pStagingBuffer->Release();
+    if (pResultBuffer) pResultBuffer->Release();
+    if (pParamsCB) pParamsCB->Release();
+    if (pComputeShader) pComputeShader->Release();
+    pContext->Release();
+    pDevice->Release();
+    Pause();
+}
+
 // 选择测试时长
 int SelectDuration(bool allowInfinite)
 {
@@ -8128,6 +8897,12 @@ void ShowUpdateContent()
     std::cout << "检测到程序已更新\n";
     std::cout << "==============================\n\n";
     SaveCurrentVersion();
+    if (IsUpdateNoticeSuppressed())
+    {
+        std::cout << "已按您的设置跳过更新内容展示（可在主菜单 25 软件更新中重新开启）。\n";
+        Pause();
+        return;
+    }
     if (!g_bOnlineMode)
     {
         std::cout << "离线模式下请访问 GitHub 查看更新内容。\n";
@@ -8147,8 +8922,18 @@ void ShowUpdateContent()
 
     std::cout << "=== 更新内容 ===\n";
     std::cout << body << "\n\n";
-    std::cout << "完整更新日志：" << GITHUB_RELEASE_URL << "\n";
+    std::cout << "完整更新日志：" << GITHUB_RELEASE_URL << "\n\n";
 
+    std::cout << "是否不再显示更新提示？（以后更新后直接进入主菜单）(y/n): ";
+    char skip;
+    std::cin >> skip;
+    std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+    if (skip == 'y' || skip == 'Y')
+    {
+        SetSettingsValue("SkipUpdateNotice", "1");
+        std::cout << "已记录：今后更新后不再显示更新内容。\n";
+        std::cout << "如需重新开启，可在主菜单 25（软件更新）中选择开启。\n";
+    }
     Pause();
 }
 
@@ -8236,7 +9021,21 @@ void SoftwareUpdate()
     std::cout << "========== 软件更新 ==========\n";
     std::cout << "当前版本: " << TOOLBOX_VERSION << "\n";
     std::cout << "仓库: https://github.com/huvubb/system-toolbox\n";
+    std::cout << "更新后内容提示: " << (IsUpdateNoticeSuppressed() ? "已关闭" : "已开启") << "\n";
     std::cout << "==============================\n\n";
+
+    if (IsUpdateNoticeSuppressed())
+    {
+        std::cout << "是否重新开启更新后的内容提示？(y/n): ";
+        char reopen;
+        std::cin >> reopen;
+        std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+        if (reopen == 'y' || reopen == 'Y')
+        {
+            SetSettingsValue("SkipUpdateNotice", "0");
+            std::cout << "已重新开启：下次更新后会显示更新内容。\n\n";
+        }
+    }
 
     std::string localHash = GetLocalExeHash();
     if (localHash.empty())
