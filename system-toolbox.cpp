@@ -11833,18 +11833,34 @@ function Get-BypassUnattend([string]$PsArch) {
         '  </settings>' + "`r`n" +
         '</unattend>'
 }
+function Unload-OfflineHive([string]$Name) {
+    [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+    $keyPath = 'HKLM:\' + ($Name -replace '^HKLM\\','')
+    for ($i = 0; $i -lt 3; $i++) {
+        reg unload $Name | Out-Null
+        if (-not (Test-Path -LiteralPath $keyPath)) { return }
+        Start-Sleep -Milliseconds 300
+    }
+    Write-Host "警告：离线注册表挂接点未能释放：$Name" -ForegroundColor Yellow
+}
+function Mount-OfflineHive([string]$Name,[string]$HivePath) {
+    if (-not (Test-Path -LiteralPath $HivePath)) { throw "缺少注册表配置单元: $HivePath" }
+    $keyPath = 'HKLM:\' + ($Name -replace '^HKLM\\','')
+    # 上次异常退出可能留下同名挂载，会锁住 hive 文件并导致 reg load 报拒绝访问
+    if (Test-Path -LiteralPath $keyPath) { Unload-OfflineHive $Name }
+    if (Test-Path -LiteralPath $keyPath) { throw "离线注册表挂接点被占用：$Name" }
+    reg load $Name "$HivePath" | Out-Null
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $keyPath)) { throw "加载离线注册表失败：$HivePath" }
+}
 function Set-OfflineBypass([string]$WindowsDir) {
     $software = Join-Path $WindowsDir 'System32\config\SOFTWARE'
     $system = Join-Path $WindowsDir 'System32\config\SYSTEM'
-    foreach ($hive in @($software,$system)) {
-        if (-not (Test-Path -LiteralPath $hive)) { throw "缺少注册表配置单元: $hive" }
-    }
-    reg load 'HKLM\STB_SOFTWARE' "$software" | Out-Null
+    Mount-OfflineHive 'HKLM\STB_SOFTWARE' $software
     try {
         New-Item -Path 'HKLM:\STB_SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE' -Force -ErrorAction SilentlyContinue | Out-Null
         New-ItemProperty -Path 'HKLM:\STB_SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE' -Name BypassNRO -Value 1 -PropertyType DWord -Force | Out-Null
-    } finally { [void](reg unload 'HKLM\STB_SOFTWARE') }
-    reg load 'HKLM\STB_SYSTEM' "$system" | Out-Null
+    } finally { Unload-OfflineHive 'HKLM\STB_SOFTWARE' }
+    Mount-OfflineHive 'HKLM\STB_SYSTEM' $system
     try {
         New-Item -Path 'HKLM:\STB_SYSTEM\Setup\LabConfig' -Force -ErrorAction SilentlyContinue | Out-Null
         foreach ($name in @('BypassTPMCheck','BypassSecureBootCheck','BypassRAMCheck','BypassCPUCheck','BypassStorageCheck','BypassDiskCheck')) {
@@ -11852,7 +11868,7 @@ function Set-OfflineBypass([string]$WindowsDir) {
         }
         New-Item -Path 'HKLM:\STB_SYSTEM\Setup\MoSetup' -Force -ErrorAction SilentlyContinue | Out-Null
         New-ItemProperty -Path 'HKLM:\STB_SYSTEM\Setup\MoSetup' -Name AllowUpgradesWithUnsupportedTPMOrCPU -Value 1 -PropertyType DWord -Force | Out-Null
-    } finally { [void](reg unload 'HKLM\STB_SYSTEM') }
+    } finally { Unload-OfflineHive 'HKLM\STB_SYSTEM' }
 }
 function Write-UnattendFile([string]$FilePath,[string]$PsArch) {
     $unattend = Get-BypassUnattend $PsArch
@@ -11883,8 +11899,7 @@ function Get-MediaArchitecture([string]$SourceRoot,[string]$InstallPath,[int]$Wi
 function Enable-PortableBoot([string]$WindowsDir) {
     # 标准 Windows To Go：USB/存储控制器驱动随系统引导，换一台电脑也能启动
     $hive = Join-Path $WindowsDir 'System32\config\SYSTEM'
-    if (-not (Test-Path -LiteralPath $hive)) { throw "缺少 SYSTEM 注册表配置单元: $hive" }
-    reg load 'HKLM\STB_WTGSYS' "$hive" | Out-Null
+    Mount-OfflineHive 'HKLM\STB_WTGSYS' $hive
     try {
         $current = (Get-ItemProperty -Path 'HKLM:\STB_WTGSYS\Select' -Name Current -ErrorAction SilentlyContinue).Current
         if (-not $current) { $current = 1 }
@@ -11904,27 +11919,29 @@ function Enable-PortableBoot([string]$WindowsDir) {
                 New-ItemProperty -Path $key -Name Start -Value 0 -PropertyType DWord -Force | Out-Null
             }
         }
-    } finally { [void](reg unload 'HKLM\STB_WTGSYS') }
+    } finally { Unload-OfflineHive 'HKLM\STB_WTGSYS' }
 }
 function Assert-WindowsApplied([string]$TargetRoot) {
     foreach ($rel in @('Windows\System32\ntoskrnl.exe','Windows\System32\winload.efi','Windows\System32\config\SYSTEM','Windows\System32\drivers\ntfs.sys')) {
         if (-not (Test-Path -LiteralPath (Join-Path $TargetRoot $rel))) { throw "映像应用不完整，缺少 $rel；请重新制作。" }
     }
 }
-function Install-EfiFallback([string]$EspLetter,[string]$PsArch) {
+function Install-EfiFallback([string]$VolumeRoot,[string]$PsArch) {
     # Intel Mac / 通用固件的启动菜单只识别 ESP 上的回退路径 \EFI\Boot\bootx64.efi
+    # VolumeRoot 是卷对象给出的 GUID 路径（\\?\Volume{...}\），不依赖盘符
+    if (-not $VolumeRoot.EndsWith('\')) { $VolumeRoot += '\' }
     $fallback = switch ($PsArch) { '12' {'bootaa64.efi'} '0' {'bootia32.efi'} '6' {'bootia64.efi'} default {'bootx64.efi'} }
-    $msBoot = Join-Path $EspLetter 'EFI\Microsoft\Boot'
-    $efiBoot = Join-Path $EspLetter 'EFI\Boot'
-    $loader = Join-Path $msBoot 'bootmgfw.efi'
-    if (-not (Test-Path -LiteralPath $loader)) { throw 'UEFI 启动文件未生成（缺少 bootmgfw.efi）。' }
-    New-Item -ItemType Directory -Path $efiBoot -Force | Out-Null
+    $msBoot = $VolumeRoot + 'EFI\Microsoft\Boot\'
+    $efiBoot = $VolumeRoot + 'EFI\Boot\'
+    $loader = $msBoot + 'bootmgfw.efi'
+    if (-not [IO.File]::Exists($loader)) { throw 'UEFI 启动文件未生成（缺少 bootmgfw.efi）。' }
+    [void][IO.Directory]::CreateDirectory($efiBoot)
     foreach ($extra in @('BCD','bootmgr.efi','memtest.efi')) {
-        $file = Join-Path $msBoot $extra
-        if (Test-Path -LiteralPath $file) { Copy-Item -LiteralPath $file -Destination $efiBoot -Force -ErrorAction SilentlyContinue }
+        $file = $msBoot + $extra
+        if ([IO.File]::Exists($file)) { try { [IO.File]::Copy($file, ($efiBoot + $extra), $true) } catch { } }
     }
-    Copy-Item -LiteralPath $loader -Destination (Join-Path $efiBoot $fallback) -Force
-    if (-not (Test-Path -LiteralPath (Join-Path $efiBoot $fallback))) { throw "未能写入 EFI 回退启动文件 $fallback。" }
+    [IO.File]::Copy($loader, ($efiBoot + $fallback), $true)
+    if (-not [IO.File]::Exists($efiBoot + $fallback)) { throw "未能写入 EFI 回退启动文件 $fallback。" }
 }
 )PS"
            R"PS(function Get-ProtectedMediaDisks {
@@ -12040,10 +12057,19 @@ try {
     if ($legacy) {
         if (-not (Test-Path -LiteralPath $bootsect)) { $bootsect = $source+'boot\bootsect.exe' }
         if (-not (Test-Path -LiteralPath $bootsect)) { throw 'BIOS 模式需要 bootsect.exe，但系统目录与镜像中均未找到。' }
-        $signature = Get-AuthenticodeSignature -LiteralPath $bootsect
-        if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft') {
-            throw 'BIOS 模式需要已通过微软数字签名校验的 bootsect.exe。'
+        $signedByMicrosoft = $false
+        try {
+            Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
+            $signature = Get-AuthenticodeSignature -LiteralPath $bootsect -ErrorAction Stop
+            $signedByMicrosoft = ($signature.Status -eq 'Valid' -and $signature.SignerCertificate.Subject -match 'Microsoft')
+        } catch {
+            # 受限会话可能无法自动加载 Security 模块：回退为读取 PE 内嵌签名证书
+            try {
+                $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::CreateFromSignedFile($bootsect)
+                $signedByMicrosoft = ($cert.Subject -match 'Microsoft Corporation|Microsoft Windows')
+            } catch { $signedByMicrosoft = $false }
         }
+        if (-not $signedByMicrosoft) { throw 'BIOS 模式需要已通过微软数字签名校验的 bootsect.exe。' }
     }
     $disk | Format-List Number,FriendlyName,SerialNumber,UniqueId,Size,BusType | Out-Host
     Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | Select-Object PartitionNumber,DriveLetter,Size,Type | Format-Table | Out-Host
@@ -12068,17 +12094,26 @@ try {
     Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | Remove-Partition -Confirm:$false -ErrorAction SilentlyContinue
     $fresh = Get-Disk -Number $disk.Number
     if ($fresh.PartitionStyle -ne $partStyle) {
-        if ($fresh.PartitionStyle -ne 'RAW') {
-            Set-Disk -InputObject $fresh -PartitionStyle RAW -ErrorAction Stop
+        # Set-Disk 不接受 RAW；已初始化为另一种样式的盘必须先用 diskpart clean 回到未初始化状态
+        $dpFile = Join-Path $env:TEMP ('stb_clean_' + [guid]::NewGuid().ToString('N') + '.txt')
+        try {
+            [IO.File]::WriteAllText($dpFile, "select disk $($disk.Number)`r`nclean`r`nexit`r`n", [Text.Encoding]::ASCII)
+            & "$env:SystemRoot\System32\diskpart.exe" /s $dpFile | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "清理旧分区表失败（diskpart 退出码 $LASTEXITCODE）。" }
+        } finally { Remove-Item -LiteralPath $dpFile -Force -ErrorAction SilentlyContinue }
+        $fresh = Get-Disk -Number $disk.Number
+        Assert-MediaDisk $fresh @(Get-ProtectedMediaDisks)
+        if ([string]$fresh.UniqueId -cne $identity) { throw '磁盘身份已变化，停止写入。' }
+        if ($fresh.PartitionStyle -ne $partStyle) {
+            $fresh = Initialize-Disk -InputObject $fresh -PartitionStyle $partStyle -PassThru
         }
-        $fresh = Initialize-Disk -InputObject $fresh -PartitionStyle $partStyle -PassThru
     }
     if ($wtg) {
         if ($legacy) {
             $partition = New-Partition -InputObject $fresh -UseMaximumSize -AssignDriveLetter -IsActive
             $volume = $partition | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'WTG' -Force -Confirm:$false
         } else {
-            $esp = New-Partition -InputObject $fresh -Size 300MB -AssignDriveLetter -GptType '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
+            $esp = New-Partition -InputObject $fresh -Size 300MB -GptType '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
             $null = $esp | Format-Volume -FileSystem FAT32 -NewFileSystemLabel 'SYSTEM' -Force -Confirm:$false
             $main = New-Partition -InputObject $fresh -UseMaximumSize -AssignDriveLetter
             $volume = $main | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'WTG' -Force -Confirm:$false
@@ -12100,21 +12135,46 @@ try {
         $bcdboot = Join-Path $env:SystemRoot 'System32\bcdboot.exe'
         if (-not (Test-Path -LiteralPath $bcdboot)) { throw "系统缺少 bcdboot.exe：$bcdboot" }
         if ($legacy) {
-            & $bcdboot "$target\Windows" /s "$target" /f BIOS
-            if ($LASTEXITCODE -ne 0) { throw 'bcdboot 写入 BIOS 启动文件失败。' }
+            & $bcdboot "$target\Windows" /s "$target" /f ALL
+            $dualBoot = ($LASTEXITCODE -eq 0)
+            if (-not $dualBoot) {
+                & $bcdboot "$target\Windows" /s "$target" /f BIOS
+                if ($LASTEXITCODE -ne 0) { throw 'bcdboot 写入 BIOS 启动文件失败。' }
+                Write-Host '固件双引导写入失败，已回退为纯 BIOS 启动。' -ForegroundColor Yellow
+            }
             & $bootsect /nt60 "$target" /mbr
             if ($LASTEXITCODE -ne 0) { throw "写入 BIOS 启动代码失败: $LASTEXITCODE" }
             if (-not (Test-Path -LiteralPath ($target+'bootmgr')) -or -not (Test-Path -LiteralPath ($target+'Boot\BCD'))) {
                 throw 'BIOS 启动文件校验失败（缺少 bootmgr 或 Boot\BCD）。'
             }
+            if ($dualBoot) {
+                try { Install-EfiFallback $target $mediaArch }
+                catch { Write-Host "UEFI 回退启动文件写入失败（BIOS 启动不受影响）：$_" -ForegroundColor Yellow }
+            }
         } else {
+            # EFI 系统分区不分配盘符：用 partition/volume 对象定位，以卷 GUID 路径操作文件
             $espPartition = @(Get-Partition -DiskNumber $disk.Number | Where-Object GptType -eq '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}')[0]
-            if (-not $espPartition -or -not $espPartition.DriveLetter) { throw '无法确定 EFI 系统分区盘符。' }
-            $espLetter = "$($espPartition.DriveLetter):"
-            & $bcdboot "$target\Windows" /s $espLetter /f UEFI
-            if ($LASTEXITCODE -ne 0) { throw 'bcdboot 写入 UEFI 启动文件失败。' }
-            Install-EfiFallback $espLetter $mediaArch
-            Write-Host '已写入 EFI 回退启动文件（Intel Mac 开机按 Option 可选 EFI Boot）。' -ForegroundColor Green
+            if (-not $espPartition) { throw '找不到 EFI 系统分区。' }
+            $espVolume = $espPartition | Get-Volume
+            if (-not $espVolume -or [string]::IsNullOrWhiteSpace([string]$espVolume.UniqueId)) { throw '无法确定 EFI 系统分区卷。' }
+            $espPath = [string]$espVolume.UniqueId
+            if (-not $espPath.EndsWith('\')) { $espPath += '\' }
+            # bcdboot 的 /s 只接受卷字母：临时给该卷挂一个访问路径，写完立即撤销
+            $tempLetter = $null
+            try {
+                $espPartition | Add-PartitionAccessPath -AssignDriveLetter
+                $espPartition = Get-Partition -DiskNumber $disk.Number -PartitionNumber $espPartition.PartitionNumber
+                if (-not $espPartition.DriveLetter) { throw '无法为 EFI 系统分区取得临时访问路径。' }
+                $tempLetter = "$($espPartition.DriveLetter):"
+                & $bcdboot "$target\Windows" /s $tempLetter /f UEFI
+                if ($LASTEXITCODE -ne 0) { throw 'bcdboot 写入 UEFI 启动文件失败。' }
+            } finally {
+                if ($tempLetter) {
+                    Remove-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber $espPartition.PartitionNumber -AccessPath $tempLetter -ErrorAction SilentlyContinue
+                }
+            }
+            Install-EfiFallback $espPath $mediaArch
+            Write-Host '已写入 EFI 回退启动文件（Intel Mac 开机按 Option 可选 EFI Boot）；EFI 系统分区保持无盘符。' -ForegroundColor Green
         }
         try {
             Write-Host '正在配置便携式启动（USB 控制器驱动随系统引导）...'
