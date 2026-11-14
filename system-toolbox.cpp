@@ -2502,10 +2502,10 @@ void CpuAiBenchmark()
     unsigned hwThreads = std::thread::hardware_concurrency();
     std::cout << "检测到 CPU 逻辑核心数: " << hwThreads << "\n\n";
 
-    std::cout << "请选择矩阵规模（FP32 矩阵乘法 C = A × B）：\n";
-    std::cout << " 1. 快速（512×512，约 0.27 GFLOP）\n";
-    std::cout << " 2. 标准（768×768，约 0.9 GFLOP）\n";
-    std::cout << " 3. 重度（1024×1024，约 2.1 GFLOP）\n";
+    std::cout << "请选择矩阵规模（FP32 矩阵乘法 C = A × B，每项累计测量约 2 秒）：\n";
+    std::cout << " 1. 快速（512×512）\n";
+    std::cout << " 2. 标准（768×768）\n";
+    std::cout << " 3. 重度（1024×1024）\n";
     std::cout << " 0. 取消\n";
     int scale = GetIntInput("请选择: ");
     if (scale <= 0 || scale > 3) { std::cout << "操作已取消。" << std::endl; Pause(); return; }
@@ -2517,105 +2517,123 @@ void CpuAiBenchmark()
     std::vector<float> c(static_cast<size_t>(n) * n);
     for (size_t i = 0; i < a.size(); ++i)
     {
-        a[i] = static_cast<float>((i % 97) - 48) * 0.01f;
-        b[i] = static_cast<float>((i % 89) - 44) * 0.01f;
+        // 先转 int 再减，避免 size_t 无符号下溢产生超大数值
+        a[i] = static_cast<float>(static_cast<int>(i % 97) - 48) * 0.01f;
+        b[i] = static_cast<float>(static_cast<int>(i % 89) - 44) * 0.01f;
         c[i] = 0.0f;
     }
 
-    // 单核成绩
-    std::cout << "\n单核 FP32 计算中...\n";
+    // 单核成绩（重复计算直到累计约 2 秒，避免计时过短导致成绩失真）
+    const double kBenchmarkTargetSec = 2.0;
+    std::cout << "\n单核 FP32 计算中（累计约 " << static_cast<int>(kBenchmarkTargetSec) << " 秒）...\n";
+    int singleRounds = 0;
+    double singleSec = 0.0;
     auto start = std::chrono::steady_clock::now();
-    for (int i = 0; i < n; ++i)
-        for (int k = 0; k < n; ++k)
-        {
-            float av = a[static_cast<size_t>(i) * n + k];
-            const float* brow = &b[static_cast<size_t>(k) * n];
-            float* crow = &c[static_cast<size_t>(i) * n];
-            for (int j = 0; j < n; ++j) crow[j] += av * brow[j];
-        }
-    double singleSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    do
+    {
+        for (int i = 0; i < n; ++i)
+            for (int k = 0; k < n; ++k)
+            {
+                float av = a[static_cast<size_t>(i) * n + k];
+                const float* brow = &b[static_cast<size_t>(k) * n];
+                float* crow = &c[static_cast<size_t>(i) * n];
+                for (int j = 0; j < n; ++j) crow[j] += av * brow[j];
+            }
+        ++singleRounds;
+        singleSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    } while (singleSec < kBenchmarkTargetSec);
 
     // 多核成绩（按行分片）
     int threadCount = hwThreads ? static_cast<int>(hwThreads) : 4;
-    std::cout << "多核（" << threadCount << " 线程）FP32 计算中...\n";
+    std::cout << "多核（" << threadCount << " 线程）FP32 计算中（累计约 " << static_cast<int>(kBenchmarkTargetSec) << " 秒）...\n";
     std::atomic<int> nextRow{0};
-    start = std::chrono::steady_clock::now();
+    int multiRounds = 0;
+    double multiSec = 0.0;
     std::vector<std::thread> workers;
-    for (int t = 0; t < threadCount; ++t)
+    start = std::chrono::steady_clock::now();
+    do
     {
-        workers.emplace_back([&]()
+        nextRow = 0;
+        workers.clear();
+        for (int t = 0; t < threadCount; ++t)
         {
-            for (;;)
+            workers.emplace_back([&]()
             {
-                int i = nextRow.fetch_add(1);
-                if (i >= n) break;
-                for (int k = 0; k < n; ++k)
+                for (;;)
                 {
-                    float av = a[static_cast<size_t>(i) * n + k];
-                    const float* brow = &b[static_cast<size_t>(k) * n];
-                    float* crow = &c[static_cast<size_t>(i) * n];
-                    for (int j = 0; j < n; ++j) crow[j] += av * brow[j];
+                    int i = nextRow.fetch_add(1);
+                    if (i >= n) break;
+                    for (int k = 0; k < n; ++k)
+                    {
+                        float av = a[static_cast<size_t>(i) * n + k];
+                        const float* brow = &b[static_cast<size_t>(k) * n];
+                        float* crow = &c[static_cast<size_t>(i) * n];
+                        for (int j = 0; j < n; ++j) crow[j] += av * brow[j];
+                    }
                 }
-            }
-        });
-    }
-    for (auto& t : workers) t.join();
-    double multiSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            });
+        }
+        for (auto& t : workers) t.join();
+        ++multiRounds;
+        multiSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    } while (multiSec < kBenchmarkTargetSec);
 
     // 结果校验（输出应为有限数值）
     bool resultsValid = true;
     for (size_t i = 0; i < c.size(); ++i)
         if (!std::isfinite(c[i])) { resultsValid = false; break; }
 
-    // INT8 乘加速率（模拟量化模型推理的整数乘加）
-    std::cout << "INT8 乘加测试中...\n";
+    // INT8 乘加速率（模拟量化模型推理的整数乘加，重复多轮直到累计约 2 秒）
+    std::cout << "INT8 乘加测试中（累计约 " << static_cast<int>(kBenchmarkTargetSec) << " 秒）...\n";
     const size_t int8Count = 1ull << 26; // 每轮 64M 次乘加
     std::vector<signed char> ia(int8Count), ib(int8Count);
     for (size_t i = 0; i < int8Count; ++i)
     {
-        ia[i] = static_cast<signed char>((i % 127) - 64);
-        ib[i] = static_cast<signed char>((i * 7 % 127) - 64);
+        // 先转 int 再减，避免 size_t 无符号下溢
+        ia[i] = static_cast<signed char>(static_cast<int>(i % 127) - 64);
+        ib[i] = static_cast<signed char>(static_cast<int>(i * 7 % 127) - 64);
     }
-    int int8Rounds = 4;
+    int int8Rounds = 0;
+    std::atomic<long long> int8Checksum{0};
     auto int8Start = std::chrono::steady_clock::now();
-    long long int8Checksum = 0;
-    for (int r = 0; r < int8Rounds; ++r)
+    double int8Sec = 0.0;
+    int int8Chunks = threadCount;
+    size_t int8ChunkSize = int8Count / static_cast<size_t>(int8Chunks);
+    do
     {
-        nextRow = 0;
-        int chunks = threadCount;
-        size_t chunkSize = int8Count / static_cast<size_t>(chunks);
         workers.clear();
-        for (int t = 0; t < chunks; ++t)
+        for (int t = 0; t < int8Chunks; ++t)
         {
             workers.emplace_back([&, t]()
             {
-                size_t begin = chunkSize * static_cast<size_t>(t);
-                size_t end = t == chunks - 1 ? int8Count : begin + chunkSize;
+                size_t begin = int8ChunkSize * static_cast<size_t>(t);
+                size_t end = t == int8Chunks - 1 ? int8Count : begin + int8ChunkSize;
                 long long local = 0;
                 for (size_t i = begin; i < end; ++i)
                     local += static_cast<int>(ia[i]) * static_cast<int>(ib[i]);
-                int8Checksum += local;
+                int8Checksum += local; // 原子累加
             });
         }
         for (auto& t : workers) t.join();
-    }
-    double int8Sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - int8Start).count();
+        ++int8Rounds;
+        int8Sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - int8Start).count();
+    } while (int8Sec < kBenchmarkTargetSec);
     double int8Ops = static_cast<double>(int8Count) * int8Rounds * 2.0;
-    volatile long long int8Sink = int8Checksum;
+    volatile long long int8Sink = int8Checksum.load();
     (void)int8Sink;
 
-    double singleGflops = totalFlops / singleSec / 1e9;
-    double multiGflops = totalFlops / multiSec / 1e9;
-    double speedup = multiSec > 0 ? singleSec / multiSec : 0.0;
+    double singleGflops = totalFlops * singleRounds / singleSec / 1e9;
+    double multiGflops = totalFlops * multiRounds / multiSec / 1e9;
+    double speedup = singleGflops > 0 ? multiGflops / singleGflops : 0.0;
     double int8Giops = int8Ops / int8Sec / 1e9;
 
     std::cout << "\n===== CPU AI 算力测试结果 =====\n";
     std::cout << "FP32 矩阵乘法（" << n << "×" << n << "）:\n";
     std::cout << "  单核: " << std::fixed << std::setprecision(2) << singleGflops
-              << " GFLOPS（耗时 " << singleSec << " 秒）\n";
+              << " GFLOPS（" << singleRounds << " 轮累计 " << singleSec << " 秒）\n";
     std::cout << "  多核: " << multiGflops
-              << " GFLOPS（耗时 " << multiSec << " 秒，加速比 " << speedup << "×）\n";
-    std::cout << "INT8 乘加速率: " << int8Giops << " GIOPS（每秒十亿次乘加）\n";
+              << " GFLOPS（" << multiRounds << " 轮累计 " << multiSec << " 秒，加速比 " << speedup << "×）\n";
+    std::cout << "INT8 乘加速率: " << int8Giops << " GIOPS（" << int8Rounds << " 轮累计 " << int8Sec << " 秒）\n";
     std::cout << "计算结果校验: " << (resultsValid ? "通过" : "数值异常，成绩仅供参考") << "\n";
     Pause();
 }
@@ -7304,10 +7322,10 @@ void GpuAiComputeTest()
     }
     std::cout << "特性等级: 0x" << std::hex << featureLevel << std::dec << "\n\n";
 
-    std::cout << "请选择测试规模：\n";
-    std::cout << " 1. 快速（65536 线程 × 20000 次迭代）\n";
-    std::cout << " 2. 标准（524288 线程 × 20000 次迭代）\n";
-    std::cout << " 3. 重度（2097152 线程 × 20000 次迭代）\n";
+    std::cout << "请选择测试规模（迭代次数自动校准，每轮约 1.5 秒）：\n";
+    std::cout << " 1. 快速（65536 线程）\n";
+    std::cout << " 2. 标准（524288 线程）\n";
+    std::cout << " 3. 重度（2097152 线程）\n";
     std::cout << " 0. 取消\n";
     int scale = GetIntInput("请选择: ");
     UINT groups = 0;
@@ -7325,11 +7343,6 @@ void GpuAiComputeTest()
     const UINT kIterations = 20000;
     const UINT kThreadsPerGroup = 256;
     UINT totalThreads = groups * kThreadsPerGroup;
-    double totalFlops = static_cast<double>(totalThreads) * kIterations * 8.0; // 每次迭代 4 乘 + 4 加
-
-    std::cout << "\n计算规模: " << totalThreads << " 线程，每线程 " << kIterations
-              << " 次 FMA，总量 " << std::fixed << std::setprecision(1)
-              << totalFlops / 1e9 << " GFLOP\n\n";
 
     // 计算着色器：每线程对 float4 反复做 a = a * b + c
     const char* csSource =
@@ -7431,6 +7444,49 @@ void GpuAiComputeTest()
     if (SUCCEEDED(pContext->Map(pStagingBuffer, 0, D3D11_MAP_READ, 0, &warmMapped)))
         pContext->Unmap(pStagingBuffer, 0);
 
+    // 校准一轮：按耗时自动提高迭代次数，保证每轮不少于约 1.5 秒，避免计时过短失真
+    const double kGpuTargetSec = 1.5;
+    UINT iterations = kIterations;
+    auto calStart = std::chrono::steady_clock::now();
+    pContext->Dispatch(groups, 1, 1);
+    pContext->CopyResource(pStagingBuffer, pResultBuffer);
+    D3D11_MAPPED_SUBRESOURCE calMapped{};
+    if (SUCCEEDED(pContext->Map(pStagingBuffer, 0, D3D11_MAP_READ, 0, &calMapped)))
+        pContext->Unmap(pStagingBuffer, 0);
+    double calSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - calStart).count();
+    if (calSec > 0 && calSec < kGpuTargetSec)
+    {
+        unsigned long long scaled = static_cast<unsigned long long>(iterations * (kGpuTargetSec / calSec)) + 1;
+        if (scaled > 50000000ull) scaled = 50000000ull;
+        if (scaled > iterations) iterations = static_cast<UINT>(scaled);
+        pParamsCB->Release();
+        pParamsCB = nullptr;
+        D3D11_BUFFER_DESC calCbDesc = {};
+        calCbDesc.ByteWidth = 16;
+        calCbDesc.Usage = D3D11_USAGE_IMMUTABLE;
+        calCbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        UINT newInit[4] = { iterations, 0, 0, 0 };
+        D3D11_SUBRESOURCE_DATA newRes = {};
+        newRes.pSysMem = newInit;
+        if (FAILED(pDevice->CreateBuffer(&calCbDesc, &newRes, &pParamsCB)))
+        {
+            std::cout << "更新计算参数失败，测试中止。\n";
+            if (pResultUAV) pResultUAV->Release();
+            if (pStagingBuffer) pStagingBuffer->Release();
+            if (pResultBuffer) pResultBuffer->Release();
+            if (pComputeShader) pComputeShader->Release();
+            pContext->Release();
+            pDevice->Release();
+            Pause();
+            return;
+        }
+        pContext->CSSetConstantBuffers(0, 1, &pParamsCB);
+    }
+    double totalFlops = static_cast<double>(totalThreads) * iterations * 8.0; // 每次迭代 4 乘 + 4 加
+    std::cout << "实际规模: " << totalThreads << " 线程 × " << iterations << " 次 FMA，总量 "
+              << std::fixed << std::setprecision(1) << totalFlops / 1e9
+              << " GFLOP，每轮约 " << kGpuTargetSec << " 秒\n\n";
+
     const int passes = 3;
     double totalTime = 0.0;
     double bestTime = 0.0;
@@ -7466,6 +7522,7 @@ void GpuAiComputeTest()
     double bestGflops = totalFlops / bestTime / 1e9;
 
     std::cout << "\n===== GPU AI 算力测试结果 =====\n";
+    std::cout << "计算规模: " << totalThreads << " 线程 × " << iterations << " 次迭代，共 " << passes << " 轮\n";
     std::cout << "平均算力: " << std::fixed << std::setprecision(2) << avgGflops << " GFLOPS\n";
     std::cout << "最佳算力: " << bestGflops << " GFLOPS（约 " << bestGflops / 1000.0 << " TFLOPS）\n";
     if (computeVerified)

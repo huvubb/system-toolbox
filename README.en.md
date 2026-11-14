@@ -10,9 +10,13 @@
 
 **System Toolbox** is a free, open-source maintenance toolbox for **Windows 10/11** that consolidates system maintenance, software installation, fast downloads, audio conversion, and disk management into a single console. It is written in C++17/20, released under the MIT license, and is fully portable — extract and run.
 
-[⬇️ Download v1.10.4 (ZIP)](https://github.com/huvubb/system-toolbox/releases/download/v1.10.4/system-toolbox-windows.zip) · [Release notes & checksums](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.4) · [Website](https://huvubb.github.io/system-toolbox/)
+[⬇️ Download v1.10.5 (ZIP)](https://github.com/huvubb/system-toolbox/releases/download/v1.10.5/system-toolbox-windows.zip) · [Release notes & checksums](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.5) · [Website](https://huvubb.github.io/system-toolbox/)
 
 ---
+
+## ✨ What's new in v1.10.5
+
+- **AI compute benchmark duration fix**: CPU FP32/INT8 measurements now repeat until ~2 seconds accumulate and score by total throughput (previously finished in fractions of a second); the GPU compute test auto-calibrates iterations to ~1.5 s per pass. Also fixed an unsigned underflow that produced garbage FP32 test data (verification now passes), the multi-core speedup ratio, and a data race in the INT8 checksum.
 
 ## ✨ What's new in v1.10.4
 
