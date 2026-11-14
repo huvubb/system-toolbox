@@ -10,9 +10,14 @@
 
 **System Toolbox** is a free, open-source maintenance toolbox for **Windows 10/11** that consolidates system maintenance, software installation, fast downloads, audio conversion, and disk management into a single console. It is written in C++17/20, released under the MIT license, and is fully portable — extract and run.
 
-[⬇️ Download v1.10.3 (ZIP)](https://github.com/huvubb/system-toolbox/releases/download/v1.10.3/system-toolbox-windows.zip) · [Release notes & checksums](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.3) · [Website](https://huvubb.github.io/system-toolbox/)
+[⬇️ Download v1.10.4 (ZIP)](https://github.com/huvubb/system-toolbox/releases/download/v1.10.4/system-toolbox-windows.zip) · [Release notes & checksums](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.4) · [Website](https://huvubb.github.io/system-toolbox/)
 
 ---
+
+## ✨ What's new in v1.10.4
+
+- **File digital signature (menu 12)** now installs the certificate into the machine's Trusted Root Certification Authorities and Trusted Publishers stores automatically, so signatures are recognized as valid immediately; the certificate is also exported as a `.cer` for use on other PCs. Fixed Chinese-path handling (wide-char APIs + UTF-8 BOM scripts).
+- **Humanized driver tools (menu 23)**: new one-click features — driver checkup (problem devices with advice), guided driver installation (pick a device, pick a folder, hardware IDs are matched against all INFs automatically — no need to know INF names), one-click driver backup with timestamped default location, and a hardware overview. Existing advanced tools are kept and renumbered.
 
 ## ✨ What's new in v1.10.3
 

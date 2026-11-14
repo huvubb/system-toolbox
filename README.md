@@ -6,7 +6,7 @@
 
 **System Toolbox** —— 免费开源的 Windows 10/11 系统维护工具箱，集成后台任务队列、高速下载、音乐转码和磁盘工具。
 
-[下载 v1.10.3 ZIP](https://github.com/huvubb/system-toolbox/releases/download/v1.10.3/system-toolbox-windows.zip) · [下载独立 EXE](https://github.com/huvubb/system-toolbox/releases/download/v1.10.3/system-toolbox.exe) · [更新说明与校验清单](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.3) · [项目介绍](https://huvubb.github.io/system-toolbox/)
+[下载 v1.10.4 ZIP](https://github.com/huvubb/system-toolbox/releases/download/v1.10.4/system-toolbox-windows.zip) · [下载独立 EXE](https://github.com/huvubb/system-toolbox/releases/download/v1.10.4/system-toolbox.exe) · [更新说明与校验清单](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.4) · [项目介绍](https://huvubb.github.io/system-toolbox/)
 
 > 🇨🇳 **国内直链（免代理、更快）**：[在线介绍页](https://q23213ddssd.dpdns.org/system-toolbox/) · [ZIP 直接下载](https://q23213ddssd.dpdns.org/downloads/system-toolbox-windows.zip) · [SHA256 校验清单](https://q23213ddssd.dpdns.org/downloads/system-toolbox-SHA256SUMS.txt)（与 GitHub Release 同一文件，可用哈希核对）
 
@@ -15,6 +15,12 @@ Open-source Windows maintenance toolbox with background queues, resumable downlo
 ### 本地功能更新
 
 在主菜单 36 中新增磁盘剩余空间（7）、开机启动项（8）和网络配置摘要（9）。每项以中文展示结果和建议，并将报告保存到工具箱数据目录；启动项包含命令和来源，网络报告含本机 IP、网关和 DNS，分享前请检查内容。仅查询，不修改启动设置或网络配置。通用操作也会区分权限不足、文件缺失和用户取消，并给出下一步建议。
+
+### v1.10.4
+
+文件数字签名（主菜单 12）签名后自动把证书安装到本机「受信任的根证书颁发机构」和「受信任的发布者」，签名直接被系统识别为可信（此前签名后会提示未知发布者）；证书同时导出为 `.cer`，便于在其他电脑导入；临时脚本改存 `%TEMP%`，修复中文路径下无法识别文件和脚本乱码的问题。
+
+驱动工具（主菜单 23）全面人性化，新增四个一键功能：驱动体检（列出问题设备并给出处理建议）、给设备装驱动（列出缺少驱动的设备供选择，在指定文件夹中按硬件 ID 自动匹配 INF 并安装，无需知道 INF 名称）、一键备份所有驱动（默认保存到工具箱数据目录，带时间戳）、电脑硬件概览。原有查询、备份、安装、签名等功能保留并重新编号。
 
 ### v1.10.3
 

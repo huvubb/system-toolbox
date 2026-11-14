@@ -3135,6 +3135,8 @@ void FileDigitalSignature()
     ClearScreen();
     std::cout << "========== 文件数字签名 ==========\n";
     std::cout << "本功能创建自签名证书并对文件签名。\n";
+    std::cout << "签名后会自动把证书安装到「受信任的根证书颁发机构」和\n";
+    std::cout << "「受信任的发布者」，系统将直接把签名识别为可信。\n";
     std::cout << "证书有效期10年，无时间戳服务器。\n";
     std::cout << "请注意，本工具可能会被报毒。\n";
     std::cout << "=====================================\n";
@@ -3154,7 +3156,12 @@ void FileDigitalSignature()
         if (c != '"' && c != '\'') cleanPath += c;
     }
 
-    DWORD attr = GetFileAttributesA(cleanPath.c_str());
+    DWORD attr = 0;
+    {
+        // 中文路径需转宽字符后用 W 版 API 检查（UTF-8 控制台输入直接传 ANSI 会乱码）
+        std::wstring cleanPathWide = Utf8Command(cleanPath);
+        attr = GetFileAttributesW(cleanPathWide.c_str());
+    }
     if (attr == INVALID_FILE_ATTRIBUTES)
     {
         std::cout << "文件不存在: " << cleanPath << std::endl;
@@ -3195,9 +3202,22 @@ void FileDigitalSignature()
         return;
     }
 
-    // 写入 PowerShell 脚本
-    std::string scriptPath = "C:\\sign_temp.ps1";
-    std::ofstream scriptFile(scriptPath);
+    // 写入临时 PowerShell 脚本（%TEMP%）：签名后自动把证书安装到
+    // 「受信任的根证书颁发机构」与「受信任的发布者」，使签名被系统识别为可信
+    char tempDir[MAX_PATH];
+    DWORD tempLen = GetTempPathA(MAX_PATH, tempDir);
+    if (!tempLen || tempLen >= MAX_PATH)
+    {
+        std::cout << "无法获取临时目录！" << std::endl;
+        Pause();
+        return;
+    }
+    std::string scriptPath = std::string(tempDir) + "system_toolbox_sign.ps1";
+    std::string resultPath = std::string(tempDir) + "system_toolbox_sign_result.txt";
+    std::error_code fsCleanupError;
+    std::filesystem::remove(std::filesystem::u8path(resultPath), fsCleanupError);
+    // 带 BOM 的 UTF-8 脚本，保证 Windows PowerShell 5.1 正确读取中文路径
+    std::ofstream scriptFile(std::filesystem::u8path(scriptPath), std::ios::binary);
     if (!scriptFile.is_open())
     {
         std::cout << "无法创建临时脚本！" << std::endl;
@@ -3205,29 +3225,72 @@ void FileDigitalSignature()
         return;
     }
 
+    scriptFile << "\xEF\xBB\xBF";
     scriptFile << "$ErrorActionPreference = 'Stop'\n";
     scriptFile << "try {\n";
     scriptFile << "    $certName = '" << certName << "'\n";
     scriptFile << "    $password = ConvertTo-SecureString -String '" << password << "' -Force -AsPlainText\n";
     scriptFile << "    $cert = New-SelfSignedCertificate -Subject \"CN=$certName\" -Type CodeSigningCert -CertStoreLocation 'Cert:\\CurrentUser\\My' -KeyExportPolicy Exportable -KeySpec Signature -NotAfter (Get-Date).AddYears(10)\n";
-    scriptFile << "    $certPath = Join-Path $env:TEMP \"$certName.pfx\"\n";
-    scriptFile << "    Export-PfxCertificate -Cert $cert -FilePath $certPath -Password $password | Out-Null\n";
+    scriptFile << "    $pfxPath = Join-Path $env:TEMP \"$certName.pfx\"\n";
+    scriptFile << "    $cerPath = Join-Path $env:TEMP \"$certName.cer\"\n";
+    scriptFile << "    Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $password | Out-Null\n";
+    scriptFile << "    Export-Certificate -Cert $cert -FilePath $cerPath | Out-Null\n";
+    scriptFile << "    Write-Host '正在把证书安装到受信任的根证书颁发机构...'\n";
+    scriptFile << "    Import-Certificate -FilePath $cerPath -CertStoreLocation Cert:\\LocalMachine\\Root | Out-Null\n";
+    scriptFile << "    Write-Host '正在把证书安装到受信任的发布者...'\n";
+    scriptFile << "    Import-Certificate -FilePath $cerPath -CertStoreLocation Cert:\\LocalMachine\\TrustedPublisher | Out-Null\n";
+    scriptFile << "    Write-Host '正在对文件签名...'\n";
     scriptFile << "    Set-AuthenticodeSignature -FilePath '" << cleanPath << "' -Certificate $cert -HashAlgorithm SHA256 | Out-Null\n";
-    scriptFile << "    Write-Host 'OK' >> 'C:\\sign_result.txt'\n";
+    scriptFile << "    $check = Get-AuthenticodeSignature -FilePath '" << cleanPath << "'\n";
+    scriptFile << "    Write-Host ('签名验证状态: ' + $check.StatusMessage)\n";
+    scriptFile << "    Remove-Item $pfxPath -ErrorAction SilentlyContinue\n";
+    scriptFile << "    Set-Content -Path '" << resultPath << "' -Value ('OK|' + $cerPath) -Encoding UTF8\n";
     scriptFile << "} catch {\n";
-    scriptFile << "    Write-Host \"ERR: $_\" >> 'C:\\sign_result.txt'\n";
+    scriptFile << "    Set-Content -Path '" << resultPath << "' -Value ('ERR|' + $_.Exception.Message) -Encoding UTF8\n";
     scriptFile << "}\n";
     scriptFile.close();
 
-    std::cout << "\n正在签名...\n";
-    std::cout << "如果文件被占用，请先关闭后重新运行签名。\n";
-    
+    std::cout << "\n正在签名并安装受信任证书...\n";
+    std::cout << "如果文件被占用，请先关闭后重新运行签名。\n\n";
+
     std::string psCmd = "powershell -ExecutionPolicy Bypass -File \"" + scriptPath + "\"";
     RunCmd(psCmd);
 
-    DeleteFileA(scriptPath.c_str());
-    
-    std::cout << "结果已写入 C:\\sign_result.txt" << std::endl;
+    std::filesystem::remove(std::filesystem::u8path(scriptPath), fsCleanupError);
+
+    // 读取结果并给出中文结论
+    bool signOk = false;
+    std::string cerPathOut;
+    {
+        std::ifstream resultFile(std::filesystem::u8path(resultPath));
+        std::string line;
+        while (std::getline(resultFile, line))
+        {
+            // 兼容 PowerShell 写入的 UTF-8 BOM
+            if (line.rfind("\xEF\xBB\xBF", 0) == 0) line.erase(0, 3);
+            if (line.rfind("OK|", 0) == 0)
+            {
+                signOk = true;
+                cerPathOut = line.substr(3);
+            }
+        }
+    }
+    std::filesystem::remove(std::filesystem::u8path(resultPath), fsCleanupError);
+
+    std::cout << "\n===== 签名结果 =====" << std::endl;
+    if (signOk)
+    {
+        std::cout << "签名完成，证书已自动安装到「受信任的根证书颁发机构」和「受信任的发布者」。\n";
+        std::cout << "系统现在会把这个签名识别为可信，不再提示未知发布者。\n";
+        if (!cerPathOut.empty())
+            std::cout << "证书文件已导出: " << cerPathOut << "\n（如需在其他电脑识别此签名，把该 .cer 拷贝过去并导入上述两个存储区）\n";
+        std::cout << "可在文件属性 → 数字签名 中查看详情。\n";
+    }
+    else
+    {
+        std::cout << "签名失败，请查看上方 PowerShell 输出的错误信息。\n";
+        std::cout << "常见原因：文件被占用、缺少管理员权限、被安全软件拦截。\n";
+    }
     Pause();
 }
 
@@ -7808,72 +7871,370 @@ void EnableDriverSignature()
 }
 
 // 驱动工具菜单（更新版）
+// ==================== 驱动工具人性化辅助 ====================
+
+// 读取文件内容用于 INF 匹配：自动兼容 UTF-16 编码的 INF（去除零字节后按 ASCII 匹配）
+std::string ReadInfTextForMatch(const std::string& path)
+{
+    std::ifstream file(std::filesystem::u8path(path), std::ios::binary);
+    if (!file) return "";
+    std::string raw((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    std::string text;
+    text.reserve(raw.size());
+    for (char c : raw)
+    {
+        if (c != '\0') text += c; // UTF-16LE 的 ASCII 文本去掉零字节即为可读文本
+    }
+    return text;
+}
+
+std::string ToLowerAscii(std::string text)
+{
+    std::transform(text.begin(), text.end(), text.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return text;
+}
+
+// 驱动体检：检测异常设备并用中文给出处理建议
+void DriverCheckup()
+{
+    ClearScreen();
+    std::cout << "========== 驱动体检 ==========\n";
+    std::cout << "正在检测状态异常的设备...\n\n";
+    RunCmd("powershell -NoProfile -Command \""
+        "$d = Get-PnpDevice | Where-Object { $_.Present -and $_.Status -ne 'OK' };"
+        "if ($d) { $d | Sort-Object Status, Class | Format-Table Status, Class, FriendlyName, InstanceId -AutoSize | Out-String -Width 220 }"
+        "else { Write-Host '所有在用设备状态正常，未发现问题设备。' }\"");
+    std::cout << "\n--- 体检建议 ---\n";
+    std::cout << "1) 状态为 Unknown 或 Error 的设备通常是缺少驱动，可用本菜单 2 号功能自动匹配安装。\n";
+    std::cout << "2) 未知设备（其他设备）也可以在 2 号功能里选中后直接装驱动。\n";
+    std::cout << "3) 如果只是想重新检测一遍硬件，用 15 号「扫描硬件改动」。\n";
+    std::cout << "4) 重装系统前建议先用 3 号「一键备份所有驱动」。\n";
+    Pause();
+}
+
+// 给设备装驱动：列出异常设备供选择，按硬件 ID 在指定文件夹自动匹配 INF 并安装
+void InstallDriverForDevice()
+{
+    ClearScreen();
+    std::cout << "========== 给设备装驱动 ==========\n";
+    std::cout << "第一步：正在列出需要驱动的设备...\n\n";
+
+    char tempDir[MAX_PATH];
+    DWORD tempLen = GetTempPathA(MAX_PATH, tempDir);
+    if (!tempLen || tempLen >= MAX_PATH) { std::cout << "无法获取临时目录！" << std::endl; Pause(); return; }
+    std::string tempBase = std::string(tempDir);
+    std::string deviceFile = tempBase + "stb_driver_devices.txt";
+    std::string hwidFile = tempBase + "stb_driver_hwids.txt";
+    DeleteFileA(deviceFile.c_str());
+    DeleteFileA(hwidFile.c_str());
+
+    // 枚举异常/未知设备：前半是编号列表，后半是 DEVn=InstanceId 映射
+    std::string psCmd = "powershell -NoProfile -Command \""
+        "$d = @(Get-PnpDevice | Where-Object { $_.Present -and ($_.Status -eq 'Unknown' -or $_.Status -eq 'Error') });"
+        "$out = @();"
+        "for ($i=0; $i -lt $d.Count; $i++) { $out += ('[' + ($i+1) + '] ' + $d[$i].Status + ' | ' + $d[$i].Class + ' | ' + $d[$i].FriendlyName) }"
+        "if ($d.Count -eq 0) { $out += 'NONE|' }"
+        "$out += '===IDS===';"
+        "for ($i=0; $i -lt $d.Count; $i++) { $out += ('DEV' + ($i+1) + '=' + $d[$i].InstanceId) }"
+        "Set-Content -Path '" + deviceFile + "' -Value $out -Encoding UTF8\"";
+    RunCmd(psCmd);
+
+    std::vector<std::string> labels;
+    std::vector<std::string> instanceIds;
+    bool none = false;
+    {
+        std::ifstream file(deviceFile);
+        std::string line;
+        bool inIds = false;
+        while (std::getline(file, line))
+        {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line == "===IDS===") { inIds = true; continue; }
+            if (line.rfind("NONE|", 0) == 0) { none = true; continue; }
+            if (inIds && line.rfind("DEV", 0) == 0)
+            {
+                size_t eq = line.find('=');
+                if (eq != std::string::npos) instanceIds.push_back(line.substr(eq + 1));
+            }
+            else if (!inIds && !line.empty())
+            {
+                labels.push_back(line);
+            }
+        }
+    }
+    DeleteFileA(deviceFile.c_str());
+
+    if (none || labels.empty())
+    {
+        std::cout << "\n没有发现缺少驱动的设备，所有设备都工作正常。\n";
+        std::cout << "如果是想更新某个设备的驱动，请使用「扫描硬件改动」或高级选项。\n";
+        Pause();
+        return;
+    }
+
+    std::cout << "发现 " << labels.size() << " 台需要驱动的设备：\n\n";
+    for (const auto& label : labels) std::cout << label << "\n";
+
+    int pick = GetIntInput("\n请输入要安装驱动的设备编号（0 取消）: ");
+    if (pick <= 0 || pick > static_cast<int>(labels.size()))
+    {
+        std::cout << "操作已取消。" << std::endl;
+        Pause();
+        return;
+    }
+    std::string instanceId = instanceIds[static_cast<size_t>(pick - 1)];
+
+    // 读取所选设备的硬件 ID
+    std::string psHw = "powershell -NoProfile -Command \""
+        "(Get-PnpDeviceProperty -InstanceId '" + instanceId + "' -KeyName 'DEVPKEY_Device_HardwareIds').Data | "
+        "Set-Content -Path '" + hwidFile + "' -Encoding UTF8\"";
+    RunCmd(psHw);
+
+    std::vector<std::string> hwids;
+    {
+        std::ifstream file(hwidFile);
+        std::string line;
+        while (std::getline(file, line))
+        {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) hwids.push_back(ToLowerAscii(line));
+        }
+    }
+    DeleteFileA(hwidFile.c_str());
+    if (hwids.empty())
+    {
+        std::cout << "\n无法读取该设备的硬件 ID，请改用高级选项手动指定 INF。" << std::endl;
+        Pause();
+        return;
+    }
+
+    std::string folder = GetInput("\n请输入驱动文件夹路径（会自动搜索其中所有 INF，含子目录）: ");
+    std::string cleanFolder;
+    for (char ch : folder) { if (ch != '"' && ch != '\'') cleanFolder += ch; }
+    while (!cleanFolder.empty() && (cleanFolder.back() == '\\' || cleanFolder.back() == ' ')) cleanFolder.pop_back();
+    if (cleanFolder.empty())
+    {
+        std::cout << "路径不能为空！" << std::endl;
+        Pause();
+        return;
+    }
+    DWORD folderAttr = GetFileAttributesA(cleanFolder.c_str());
+    if (folderAttr == INVALID_FILE_ATTRIBUTES || !(folderAttr & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        std::cout << "文件夹不存在: " << cleanFolder << std::endl;
+        Pause();
+        return;
+    }
+
+    std::cout << "\n正在按硬件 ID 匹配 INF（含子目录）...\n\n";
+    // 从硬件 ID 提取匹配片段：完整 ID + VEN_XXXX&DEV_XXXX
+    std::vector<std::string> fragments;
+    for (const auto& id : hwids)
+    {
+        fragments.push_back(id);
+        size_t ven = id.find("ven_");
+        size_t dev = id.find("&dev_", ven == std::string::npos ? 0 : ven);
+        if (ven != std::string::npos && dev != std::string::npos)
+        {
+            size_t end = id.find('&', dev + 1);
+            fragments.push_back(id.substr(ven, (end == std::string::npos ? std::string::npos : end - ven)));
+        }
+    }
+
+    struct InfMatch { std::string path; int score; };
+    std::vector<InfMatch> matches;
+    std::error_code fsError;
+    for (std::filesystem::recursive_directory_iterator it(std::filesystem::u8path(cleanFolder), fsError), end;
+         it != end && !fsError; it.increment(fsError))
+    {
+        if (fsError) break;
+        if (!it->is_regular_file()) continue;
+        std::string ext = ToLowerAscii(it->path().extension().string());
+        if (ext != ".inf") continue;
+        std::string infPath = PathToUtf8(it->path());
+        std::string content = ToLowerAscii(ReadInfTextForMatch(infPath));
+        int score = 0;
+        for (const auto& frag : fragments)
+            if (content.find(frag) != std::string::npos) ++score;
+        if (score > 0) matches.push_back({infPath, score});
+    }
+
+    if (matches.empty())
+    {
+        std::cout << "在这个文件夹里没有找到能匹配该设备硬件 ID 的 INF。\n";
+        std::cout << "提示：确认文件夹选对了（比如驱动包解压后的目录），或改用高级选项手动指定 INF。\n";
+        Pause();
+        return;
+    }
+
+    std::sort(matches.begin(), matches.end(), [](const InfMatch& a, const InfMatch& b) { return a.score > b.score; });
+    std::cout << "找到 " << matches.size() << " 个匹配的 INF：\n\n";
+    for (size_t i = 0; i < matches.size() && i < 20; ++i)
+        std::cout << "[" << i + 1 << "] " << matches[i].path << "\n";
+
+    std::string pickInput = GetInput("\n输入编号安装单个，输入 A 全部安装（0 取消）: ");
+    std::vector<InfMatch> chosen;
+    if (pickInput == "a" || pickInput == "A")
+        chosen = matches;
+    else
+    {
+        int idx = -1;
+        try { idx = std::stoi(pickInput); } catch (...) { idx = -1; }
+        if (idx <= 0 || idx > static_cast<int>(matches.size()))
+        {
+            std::cout << "操作已取消。" << std::endl;
+            Pause();
+            return;
+        }
+        chosen.push_back(matches[static_cast<size_t>(idx - 1)]);
+    }
+
+    for (const auto& item : chosen)
+    {
+        std::cout << "\n--- 正在安装: " << item.path << " ---\n";
+        RunCmd("pnputil /add-driver \"" + item.path + "\" /install");
+    }
+    std::cout << "\n正在扫描硬件改动，让 Windows 立即加载新驱动...\n";
+    RunCmd("pnputil /scan-devices");
+    std::cout << "\n完成！建议再跑一次 1 号「驱动体检」确认设备状态。\n";
+    Pause();
+}
+
+// 一键备份所有驱动（默认保存到工具箱数据目录，带时间戳）
+void BackupAllDriversFriendly()
+{
+    ClearScreen();
+    std::cout << "========== 一键备份所有驱动 ==========\n";
+    std::cout << "将使用 DISM 导出本机全部第三方驱动（不含系统内置驱动）。\n";
+    char dateBuf[32];
+    {
+        std::time_t now = std::time(nullptr);
+        std::tm localNow{};
+        localtime_s(&localNow, &now);
+        std::strftime(dateBuf, sizeof(dateBuf), "%Y%m%d_%H%M%S", &localNow);
+    }
+    std::string defaultDir = PathToUtf8(GetToolboxDataDirectory() / L"drivers-backup" / std::filesystem::u8path(dateBuf));
+    std::cout << "默认保存到: " << defaultDir << "\n\n";
+    std::string dir = GetInput("备份保存目录（直接回车使用默认）: ");
+    std::string cleanDir;
+    for (char ch : dir) { if (ch != '"' && ch != '\'') cleanDir += ch; }
+    while (!cleanDir.empty() && (cleanDir.back() == '\\' || cleanDir.back() == ' ')) cleanDir.pop_back();
+    if (cleanDir.empty()) cleanDir = defaultDir;
+
+    std::error_code mkError;
+    std::filesystem::create_directories(std::filesystem::u8path(cleanDir), mkError);
+    if (mkError)
+    {
+        std::cout << "无法创建备份目录: " << cleanDir << std::endl;
+        Pause();
+        return;
+    }
+
+    std::cout << "\n开始备份，驱动较多时需要几分钟...\n\n";
+    RunCmd("dism /online /export-driver /destination:\"" + cleanDir + "\"");
+
+    std::cout << "\n备份完成。\n";
+    std::cout << "还原方法：装好新系统后用本菜单 11 号「从文件夹批量安装驱动」选择该目录即可；\n";
+    std::cout << "也可以在设备管理器 → 更新驱动 → 浏览，指向该文件夹。\n";
+    Pause();
+}
+
+// 电脑硬件概览（型号/系统/处理器/内存/显卡/声卡/网卡/硬盘）
+void HardwareOverview()
+{
+    ClearScreen();
+    std::cout << "========== 电脑硬件概览 ==========\n\n";
+    RunCmd("powershell -NoProfile -Command \""
+        "$cs = Get-CimInstance Win32_ComputerSystem;"
+        "Write-Host ('电脑型号: ' + $cs.Manufacturer + ' ' + $cs.Model);"
+        "$os = Get-CimInstance Win32_OperatingSystem;"
+        "Write-Host ('操作系统: ' + $os.Caption);"
+        "$cpu = Get-CimInstance Win32_Processor;"
+        "Write-Host ('处理器: ' + $cpu.Name.Trim() + '（' + $cpu.NumberOfCores + ' 核 / ' + $cpu.NumberOfLogicalProcessors + ' 线程）');"
+        "Write-Host ('内存: ' + [math]::Round($cs.TotalPhysicalMemory/1GB,1) + ' GB');"
+        "Get-CimInstance Win32_VideoController | ForEach-Object { Write-Host ('显卡: ' + $_.Name + '  驱动版本: ' + $_.DriverVersion) };"
+        "Get-CimInstance Win32_SoundDevice | ForEach-Object { Write-Host ('声卡: ' + $_.Name) };"
+        "Get-CimInstance Win32_NetworkAdapter -Filter 'PhysicalAdapter=true' | ForEach-Object { Write-Host ('网卡: ' + $_.Name) };"
+        "Get-CimInstance Win32_DiskDrive | ForEach-Object { Write-Host ('硬盘: ' + $_.Model + '  ' + [math]::Round($_.Size/1GB,0) + ' GB') }\"");
+    Pause();
+}
+
 void DriverToolsMenu()
 {
     while (true)
     {
         ClearScreen();
         std::cout << "========== 驱动工具 ==========\n";
-        std::cout << "=== 驱动查看 ===\n";
-        std::cout << " 1. 查看所有驱动列表\n";
-        std::cout << " 2. 查看已安装驱动详情\n";
-        std::cout << " 3. 查看驱动版本信息\n";
-        std::cout << " 4. 查看未签名驱动\n";
-        std::cout << "\n=== 驱动备份 ===\n";
-        std::cout << " 5. 备份所有驱动\n";
-        std::cout << " 6. 备份指定驱动\n";
-        std::cout << "\n=== 驱动操作 ===\n";
-        std::cout << " 7. 安装驱动\n";
-        std::cout << " 8. 卸载驱动\n";
-        std::cout << " 9. 启用驱动\n";
-        std::cout << "10. 禁用驱动\n";
-        std::cout << "11. 更新驱动\n";
-        std::cout << "\n=== 驱动签名 ===\n";
-        std::cout << "12. 检查驱动签名状态\n";
-        std::cout << "13. 禁用驱动强制签名\n";
-        std::cout << "14. 启用驱动强制签名\n";
-        std::cout << "\n=== 驱动高级 ===\n";
-        std::cout << "15. 强制安装驱动\n";
-        std::cout << "16. 检查驱动冲突\n";
-        std::cout << "17. 导出驱动列表到文件\n";
+        std::cout << "--- 一键智能（推荐） ---\n";
+        std::cout << " 1. 驱动体检（检测问题设备并给建议）\n";
+        std::cout << " 2. 给设备装驱动（选设备+选文件夹自动匹配 INF）\n";
+        std::cout << " 3. 一键备份所有驱动\n";
+        std::cout << " 4. 电脑硬件概览\n";
+        std::cout << "--- 驱动查询 ---\n";
+        std::cout << " 5. 查看所有驱动列表\n";
+        std::cout << " 6. 查看已安装驱动详情\n";
+        std::cout << " 7. 查看驱动版本信息\n";
+        std::cout << " 8. 查看未签名驱动\n";
+        std::cout << "--- 备份与还原 ---\n";
+        std::cout << " 9. 备份指定驱动（高级，需 INF 名称）\n";
+        std::cout << "--- 驱动操作 ---\n";
+        std::cout << "10. 安装驱动（指定 INF 文件）\n";
+        std::cout << "11. 从文件夹批量安装驱动（自动扫描 INF）\n";
+        std::cout << "12. 卸载驱动\n";
+        std::cout << "13. 启用驱动\n";
+        std::cout << "14. 禁用驱动\n";
+        std::cout << "15. 扫描硬件改动（重新检测设备）\n";
+        std::cout << "--- 驱动签名（高级） ---\n";
+        std::cout << "16. 检查驱动签名状态\n";
+        std::cout << "17. 禁用驱动强制签名\n";
+        std::cout << "18. 启用驱动强制签名\n";
+        std::cout << "--- 其他 ---\n";
+        std::cout << "19. 检查驱动冲突（异常设备）\n";
+        std::cout << "20. 强制安装驱动（指定 INF 文件）\n";
+        std::cout << "21. 导出驱动列表到文件\n";
         std::cout << "\n 0. 返回主菜单\n";
         std::cout << "==============================\n";
-        
+
         int choice = GetIntInput("请选择: ");
-        
+
         if (choice == 0) break;
-        
+
         switch (choice)
         {
             case 1:
+                DriverCheckup();
+                break;
+            case 2:
+                InstallDriverForDevice();
+                break;
+            case 3:
+                BackupAllDriversFriendly();
+                break;
+            case 4:
+                HardwareOverview();
+                break;
+            case 5:
                 ClearScreen();
                 RunCmd("driverquery /fo table");
                 Pause();
                 break;
-            case 2:
+            case 6:
                 ClearScreen();
                 RunCmd("driverquery /v /fo list");
                 Pause();
                 break;
-            case 3:
+            case 7:
                 ClearScreen();
                 RunCmd("driverquery /v /fo table");
                 Pause();
                 break;
-            case 4:
+            case 8:
                 ClearScreen();
                 RunCmd("driverquery /fo table /si");
                 Pause();
                 break;
-            case 5:
-            {
-                std::string dir = GetInput("备份目录: ");
-                if (!dir.empty())
-                    RunCmd("dism /online /export-driver /destination:\"" + dir + "\"");
-                Pause();
-                break;
-            }
-            case 6:
+            case 9:
             {
                 std::string name = GetInput("驱动名称（如 oem0.inf）: ");
                 std::string dir = GetInput("备份目录: ");
@@ -7882,7 +8243,7 @@ void DriverToolsMenu()
                 Pause();
                 break;
             }
-            case 7:
+            case 10:
             {
                 std::string inf = GetInput("INF 文件路径: ");
                 if (!inf.empty())
@@ -7890,7 +8251,27 @@ void DriverToolsMenu()
                 Pause();
                 break;
             }
-            case 8:
+            case 11:
+            {
+                std::string folder = GetInput("请输入驱动文件夹路径（含子目录一起安装）: ");
+                std::string cleanFolder;
+                for (char ch : folder) { if (ch != '"' && ch != '\'') cleanFolder += ch; }
+                while (!cleanFolder.empty() && (cleanFolder.back() == '\\' || cleanFolder.back() == ' ')) cleanFolder.pop_back();
+                if (!cleanFolder.empty())
+                {
+                    std::cout << "将递归安装该文件夹内全部 INF，Windows 只会加载匹配设备的驱动。\n";
+                    std::cout << "是否继续？(y/n): ";
+                    char c; std::cin >> c; std::cin.ignore();
+                    if (c == 'y' || c == 'Y')
+                    {
+                        RunCmd("pnputil /add-driver \"" + cleanFolder + "\\*.inf\" /subdirs /install");
+                        RunCmd("pnputil /scan-devices");
+                    }
+                }
+                Pause();
+                break;
+            }
+            case 12:
             {
                 std::string name = GetInput("驱动名称（如 oem0.inf）: ");
                 if (!name.empty())
@@ -7904,7 +8285,7 @@ void DriverToolsMenu()
                 Pause();
                 break;
             }
-            case 9:
+            case 13:
             {
                 std::string name = GetInput("驱动名称: ");
                 if (!name.empty())
@@ -7912,7 +8293,7 @@ void DriverToolsMenu()
                 Pause();
                 break;
             }
-            case 10:
+            case 14:
             {
                 std::string name = GetInput("驱动名称: ");
                 if (!name.empty())
@@ -7926,21 +8307,29 @@ void DriverToolsMenu()
                 Pause();
                 break;
             }
-            case 11:
+            case 15:
                 ClearScreen();
+                std::cout << "正在扫描硬件改动，Windows 会自动检测新设备...\n\n";
                 RunCmd("pnputil /scan-devices");
+                std::cout << "\n扫描完成。插拔新硬件后也可以执行一次。\n";
                 Pause();
                 break;
-            case 12:
+            case 16:
                 CheckDriverSigningStatus();
                 break;
-            case 13:
+            case 17:
                 DisableDriverSignature();
                 break;
-            case 14:
+            case 18:
                 EnableDriverSignature();
                 break;
-            case 15:
+            case 19:
+                ClearScreen();
+                std::cout << "========== 检查驱动冲突（异常设备） ==========\n\n";
+                RunCmd("powershell -NoProfile -Command \"Get-PnpDevice | Where-Object { $_.Present -and $_.Status -ne 'OK' } | Format-Table Status, Class, FriendlyName, InstanceId -AutoSize | Out-String -Width 220\"");
+                Pause();
+                break;
+            case 20:
             {
                 std::string inf = GetInput("INF 文件路径: ");
                 if (!inf.empty())
@@ -7954,12 +8343,7 @@ void DriverToolsMenu()
                 Pause();
                 break;
             }
-            case 16:
-                ClearScreen();
-                RunCmd("powershell -Command \"Get-PnpDevice | Where-Object { $_.Status -ne 'OK' } | Format-List FriendlyName,Status,InstanceId\"");
-                Pause();
-                break;
-            case 17:
+            case 21:
             {
                 std::string path = GetInput("保存路径（如 C:\\drivers.txt）: ");
                 if (!path.empty())
