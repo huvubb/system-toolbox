@@ -1,6 +1,19 @@
 # 更新日志
 
+## npm 1.11.0 — 2026-11-15
+
+### 网卡吞吐量与镜像源（主菜单 39）
+
+- 实时面板新增网卡吞吐量：GetIfTable2 差值采样，仅显示硬件网卡（过滤 Npcap/QoS/WFP 伪网卡），每网卡显示 ↓接收/↑发送速度，并用管道符进度条相对渲染；速度自适应 B/s→GB/s。
+- winget 安装首次执行前静默切换到中科大 winget-source 镜像（winget source remove/add，失败不阻断）；npm install 一律追加 npmmirror 镜像。说明：清华 TUNA 未提供 winget/npm 镜像（实测 404），故选用等效国内官方镜像。
+- 构建新增 iphlpapi 链接；MinGW 需 _WIN32_WINNT=0x0A00 且先包含 ws2ipdef.h（netioapi.h 的 _WS2IPDEF_ 守卫），已在源码处理。
+
+### 测试启动提示
+
+- GPU 测试（DirectX 11/Compute）、RAM 带宽测试在初始化/分配阶段补充即时进度提示（设备创建、着色器编译、内存分配清零），消除启动时 2-3 秒的无反馈期。
+
 ## npm 1.10.9 — 2026-11-15
+
 
 ### 依赖项下载改用 CURL 并跳过 SSL/TLS 校验
 

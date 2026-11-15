@@ -14,6 +14,15 @@ bool g_bOnlineMode = true; // true=在线模式，false=离线模式
 bool g_bModeInitialized = false;
 
 #define _CRT_SECURE_NO_WARNINGS
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00 // 网卡吞吐量需要 GetIfTable2（MinGW iphlpapi.h 要求 0x0A00 才引入 netioapi.h）
+#endif
+#ifndef WINVER
+#define WINVER 0x0A00
+#endif
+#ifndef NTDDI_VERSION
+#define NTDDI_VERSION 0x0A000000
+#endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -40,6 +49,8 @@ bool g_bModeInitialized = false;
 #include <d3d11.h> // 添加
 #include <dxgi.h>  // 添加
 #include <shellapi.h>
+#include <ws2ipdef.h> // 必须在 iphlpapi.h 之前：MinGW 的 netioapi.h 内容包在 _WS2IPDEF_ 守卫里
+#include <iphlpapi.h> // 网卡吞吐量（GetIfTable2）
 #include <conio.h>
 #include <fstream>
 #include <chrono>
@@ -63,6 +74,7 @@ bool g_bModeInitialized = false;
 #pragma comment(lib, "wbemuuid.lib") // WMI
 #pragma comment(lib, "oleaut32.lib") // BSTR
 #pragma comment(lib, "setupapi.lib") // 设备枚举
+#pragma comment(lib, "iphlpapi.lib") // 网络接口统计
 
 // ====================================================================
 // 基础工具函数
@@ -711,6 +723,32 @@ std::wstring Utf8Command(const std::string& text)
     return result;
 }
 
+// winget 安装前静默切换到国内镜像源（中科大 winget-source；清华源未提供 winget 镜像）
+std::string ToLowerAscii(std::string text);
+void EnsureWingetMirror();
+void EnsureWingetMirror()
+{
+    static bool done = false;
+    if (done) return;
+    done = true;
+    // 已指向镜像则跳过
+    FILE* pipe = _popen("winget source list 2>nul", "r");
+    if (pipe)
+    {
+        char buffer[2048];
+        std::string listing;
+        while (fgets(buffer, sizeof(buffer), pipe)) listing += buffer;
+        _pclose(pipe);
+        std::string lower = ToLowerAscii(listing);
+        if (lower.find("ustc") != std::string::npos || lower.find("npmmirror") != std::string::npos
+            || lower.find("zju.edu") != std::string::npos || lower.find("mirror") != std::string::npos)
+            return;
+    }
+    // 静默移除默认源并添加中科大镜像；失败不阻断后续安装
+    system("winget source remove --name winget >nul 2>&1");
+    system("winget source add --name winget --arg https://mirrors.ustc.edu.cn/winget-source/ --type \"Microsoft.PreIndexed.Package\" >nul 2>&1");
+}
+
 // 执行系统命令
 bool RunCmd(const std::string& cmd, bool showOutput = true, bool forceForeground = false)
 {
@@ -722,6 +760,7 @@ bool RunCmd(const std::string& cmd, bool showOutput = true, bool forceForeground
         return false;
     }
     std::cout << "\n正在处理：" << GetCommandLabel(cmd) << "...\n";
+    if (cmd.rfind("winget install ", 0) == 0) EnsureWingetMirror(); // 静默切换 winget 镜像源
     int ret;
     std::filesystem::path log;
     if (!showOutput)
@@ -2383,6 +2422,7 @@ bool MeasureMemoryBandwidth(size_t bytes, int threads, double& writeGBs, double&
     if (bytes < static_cast<size_t>(threads) * 1024 * 1024)
         bytes = static_cast<size_t>(threads) * 1024 * 1024;
 
+    std::cout << "正在分配 " << bytes / (1024 * 1024) << " MB × 2 内存（首次可能需 1-3 秒，系统要清零页面）...\n" << std::flush;
     unsigned char* buffer = nullptr;
     unsigned char* copyBuffer = nullptr;
     try
@@ -2651,6 +2691,8 @@ void CpuAiBenchmark()
     if (scale <= 0 || scale > 3) { std::cout << "操作已取消。" << std::endl; Pause(); return; }
     int n = scale == 1 ? 512 : (scale == 2 ? 768 : 1024);
     double totalFlops = 2.0 * n * n * n;
+
+    std::cout << "正在准备测试矩阵（" << n << "×" << n << "）...\n" << std::flush;
 
     std::vector<float> a(static_cast<size_t>(n) * n);
     std::vector<float> b(static_cast<size_t>(n) * n);
@@ -3975,6 +4017,17 @@ void DiskSlotInfo()
     Pause();
 }
 
+// 网速格式化（B/s → KB/s → MB/s → GB/s）
+std::string FormatBytesPerSecond(double bytesPerSec)
+{
+    std::ostringstream out;
+    if (bytesPerSec >= 1024.0 * 1024 * 1024) out << std::fixed << std::setprecision(2) << bytesPerSec / (1024.0 * 1024 * 1024) << " GB/s";
+    else if (bytesPerSec >= 1024.0 * 1024) out << std::fixed << std::setprecision(1) << bytesPerSec / (1024.0 * 1024) << " MB/s";
+    else if (bytesPerSec >= 1024.0) out << std::fixed << std::setprecision(1) << bytesPerSec / 1024.0 << " KB/s";
+    else out << static_cast<int>(bytesPerSec) << " B/s";
+    return out.str();
+}
+
 // 实时监测面板：CPU 负载、内存、ACPI 热区温度、GPU 温度（nvidia-smi）、硬盘 SMART 温度
 void HardwareRealtimePanel()
 {
@@ -4037,6 +4090,8 @@ void HardwareRealtimePanel()
         }
         return -1;
     };
+    std::map<unsigned long, std::pair<unsigned long long, unsigned long long>> netPrevOctets;
+    std::chrono::steady_clock::time_point netPrevTick = std::chrono::steady_clock::now();
     while (running)
     {
         DWORD waitedMs = 0;
@@ -4098,6 +4153,40 @@ void HardwareRealtimePanel()
         std::vector<bool> diskTempValid(engine.disks.size(), false);
         for (size_t i = 0; i < engine.disks.size(); ++i)
             diskTempValid[i] = ReadEngineDiskTemperature(engine.disks[i], diskTempValues[i]);
+
+        // 网卡吞吐量（GetIfTable2 两次采样差值）
+        auto netNow = std::chrono::steady_clock::now();
+        double netElapsed = std::chrono::duration<double>(netNow - netPrevTick).count();
+        netPrevTick = netNow;
+        struct NetSpeedEntry { std::string name; double in, out; };
+        std::vector<NetSpeedEntry> netSpeeds;
+        double maxNetTotal = 0;
+        PMIB_IF_TABLE2 ifTable = nullptr;
+        if (GetIfTable2(&ifTable) == NO_ERROR)
+        {
+            if (netElapsed > 0.2)
+            {
+                for (ULONG i = 0; i < ifTable->NumEntries; ++i)
+                {
+                    const MIB_IF_ROW2& row = ifTable->Table[i];
+                    if (row.Type == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+                    if (row.OperStatus != IfOperStatusUp) continue;
+                    if (!row.InterfaceAndOperStatusFlags.HardwareInterface) continue; // 过滤 Npcap/QoS/WFP 等软件伪网卡
+                    auto it = netPrevOctets.find(row.InterfaceIndex);
+                    if (it != netPrevOctets.end())
+                    {
+                        NetSpeedEntry entry;
+                        entry.name = WideToUtf8Text(row.Alias);
+                        entry.in = (row.InOctets >= it->second.first) ? (row.InOctets - it->second.first) / netElapsed : 0.0;
+                        entry.out = (row.OutOctets >= it->second.second) ? (row.OutOctets - it->second.second) / netElapsed : 0.0;
+                        if (entry.in + entry.out > maxNetTotal) maxNetTotal = entry.in + entry.out;
+                        netSpeeds.push_back(entry);
+                    }
+                    netPrevOctets[row.InterfaceIndex] = { row.InOctets, row.OutOctets };
+                }
+            }
+            FreeMibTable(ifTable);
+        }
 
         // GPU 温度与风扇（NVIDIA NvAPI / AMD ADL；nvidia-smi 兜底）
         std::vector<std::string> gpuLines;
@@ -4242,6 +4331,23 @@ void HardwareRealtimePanel()
         }
         else
             std::cout << "  硬盘: （未枚举到物理磁盘）\n";
+
+        std::cout << "网卡吞吐量:\n";
+        if (!netSpeeds.empty())
+        {
+            for (const auto& entry : netSpeeds)
+            {
+                int width = 20;
+                int filled = maxNetTotal > 0 ? static_cast<int>(width * (entry.in + entry.out) / maxNetTotal + 0.5) : 0;
+                if (filled > width) filled = width;
+                if (filled < 0) filled = 0;
+                std::cout << "  " << entry.name << "  ↓ " << FormatBytesPerSecond(entry.in)
+                          << " [" << std::string(filled, '|') << std::string(width - filled, '-') << "]  ↑ "
+                          << FormatBytesPerSecond(entry.out) << "\n";
+            }
+        }
+        else
+            std::cout << "  （首次采样中或无活动网卡）\n";
     }
 
     if (useWmiZones) WmiClose(thermalSession);
@@ -7857,7 +7963,7 @@ void NpmInstallMenu()
             std::cin >> c;
             std::cin.ignore();
             if (c != 'y' && c != 'Y') { std::cout << "操作已取消。" << std::endl; return; }
-            RunCmd("npm install -g " + package);
+            RunCmd("npm install -g " + package + " --registry=https://registry.npmmirror.com"); // 静默使用国内镜像（清华未提供 npm 源）
         };
         
         switch (choice)
@@ -8779,6 +8885,7 @@ void DirectX11Test()
     UINT texHeight = static_cast<UINT>(clientRect.bottom);
 
     // 创建 D3D11 设备
+    std::cout << "正在创建 D3D11 设备与交换链（首次初始化驱动约需 1-3 秒）...\n" << std::flush;
     D3D_FEATURE_LEVEL featureLevel;
     ID3D11Device* pDevice = nullptr;
     ID3D11DeviceContext* pContext = nullptr;
@@ -8899,6 +9006,7 @@ void DirectX11Test()
     pContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     
     // 创建着色器（真正编译并绑定到管线，配合顶点旋转动画形成实际 GPU 负载）
+    std::cout << "正在编译着色器（首次约需 1 秒）...\n" << std::flush;
     const char* vsSource =
         "cbuffer AnimCB : register(b0) { float g_time; float3 g_pad; }; "
         "float4 main(float3 pos : POSITION, float4 color : COLOR) : SV_POSITION { "
@@ -9062,6 +9170,7 @@ void GpuAiComputeTest()
     ClearScreen();
     std::cout << "========== GPU AI 算力测试（DirectX 11 Compute） ==========\n\n";
 
+    std::cout << "正在创建 D3D11 设备（首次初始化驱动约需 1-3 秒）...\n" << std::flush;
     D3D_FEATURE_LEVEL featureLevel;
     ID3D11Device* pDevice = nullptr;
     ID3D11DeviceContext* pContext = nullptr;
@@ -10686,7 +10795,7 @@ case 15:
             case 45:
             {
                 std::string package = GetInput("npm 包名: ");
-                if (!package.empty()) RunCmd("npm install -g " + package);
+                if (!package.empty()) RunCmd("npm install -g " + package + " --registry=https://registry.npmmirror.com"); // 静默使用国内镜像
                 Pause();
                 break;
             }
@@ -10796,7 +10905,7 @@ bool DownloadWithCurlInsecure(const std::string& url, const std::string& destina
     }
     if (destination.empty()) return false;
     auto staged = std::filesystem::u8path(destination + ".curl-part");
-    std::cout << "正在使用 CURL 下载（强制跳过 SSL/TLS 证书校验）...\n";
+    std::cout << "正在使用 CURL 下载（强制跳过 SSL/TLS 证书校验）...\n" << std::flush;
     bool ok = RunProcessArguments({L"curl.exe", L"--fail", L"--insecure", L"--ssl-no-revoke", L"--location",
         L"--retry", L"2", L"--connect-timeout", L"20", L"--output", staged.wstring(), L"--url", Utf8Command(url)});
     if (!ok)
