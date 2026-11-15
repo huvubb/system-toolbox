@@ -6,7 +6,7 @@
 
 **System Toolbox** —— 免费开源的 Windows 10/11 系统维护工具箱，集成后台任务队列、高速下载、音乐转码和磁盘工具。
 
-[下载 v1.10.5 ZIP](https://github.com/huvubb/system-toolbox/releases/download/v1.10.5/system-toolbox-windows.zip) · [下载独立 EXE](https://github.com/huvubb/system-toolbox/releases/download/v1.10.5/system-toolbox.exe) · [更新说明与校验清单](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.5) · [项目介绍](https://huvubb.github.io/system-toolbox/)
+[下载 v1.10.7 ZIP](https://github.com/huvubb/system-toolbox/releases/download/v1.10.7/system-toolbox-windows.zip) · [下载独立 EXE](https://github.com/huvubb/system-toolbox/releases/download/v1.10.7/system-toolbox.exe) · [更新说明与校验清单](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.7) · [项目介绍](https://huvubb.github.io/system-toolbox/)
 
 > 🇨🇳 **国内直链（免代理、更快）**：[在线介绍页](https://q23213ddssd.dpdns.org/system-toolbox/) · [ZIP 直接下载](https://q23213ddssd.dpdns.org/downloads/system-toolbox-windows.zip) · [SHA256 校验清单](https://q23213ddssd.dpdns.org/downloads/system-toolbox-SHA256SUMS.txt)（与 GitHub Release 同一文件，可用哈希核对）
 
@@ -15,6 +15,19 @@ Open-source Windows maintenance toolbox with background queues, resumable downlo
 ### 本地功能更新
 
 在主菜单 36 中新增磁盘剩余空间（7）、开机启动项（8）和网络配置摘要（9）。每项以中文展示结果和建议，并将报告保存到工具箱数据目录；启动项包含命令和来源，网络报告含本机 IP、网关和 DNS，分享前请检查内容。仅查询，不修改启动设置或网络配置。通用操作也会区分权限不足、文件缺失和用户取消，并给出下一步建议。
+
+### v1.10.7
+
+主菜单 **39 → 硬件实时监测** 新增，搭载启动时加载的自研硬件引擎（WMI 仅作兜底）：
+
+- 实时监测面板（curl 式清屏重绘，刷新间隔可调，ESC 退出）：CPU 负载（GetSystemTimes 差值）、内存占用、ACPI 热区温度（原生 IOCTL，失败回退 WMI）、NVIDIA 显卡温度（NvAPI 动态加载）、硬盘温度（NVMe 直读 SMART/Health 日志、SATA 读 SMART 属性 194/190）。
+- 内存插槽信息：占用/总数（SMBIOS 直读，GetSystemFirmwareTable 不可用时回退 WMI）、主板最大支持容量、每根内存条位置/容量/频率/厂商/型号。
+- 硬盘与存储插槽：按 IDE/SATA/USB/NVMe 分类列出已接设备（CreateFile + IOCTL 枚举），CD-ROM 光驱（含盘符），SMBIOS 插槽占用/总数（NGFF/M.2、mSATA、SATA、IDE、其他 PCIe），未报告的类型显示 0/0。
+- RAM 基准测试：读取/写入/复制带宽（GB/s）。
+
+### v1.10.6
+
+修复 Windows 更新禁用被自动恢复的问题：新增禁用「Windows 更新医疗服务」（WaaSMedicSvc，受系统保护，注册表方式禁用，重启生效）；禁用更新相关计划任务；完成时通过 SCM API 与注册表校验实际状态，不再误报失败。恢复默认改为手动启动（系统默认），策略未设置时跳过删除。
 
 ### v1.10.5
 
@@ -111,6 +124,7 @@ AI 算力测试（主菜单 38）测量时长修复：CPU FP32/INT8 改为自适
 | 36 | 系统诊断与报告 | 电池、睡眠、异常重启、更新历史、软件清单 |
 | 37 | DirectX 与 DLL 修复 | 旧版游戏运行库、系统组件与文件检查 |
 | 38 | AI 算力测试 | CPU FP32/INT8、GPU Compute GFLOPS、内存带宽 |
+| 39 | 硬件实时监测 | 温度/负载/内存插槽/存储插槽/RAM 基准 |
 | 91 | 卸载本工具箱 | 删除卸载注册项、数据目录与程序自身 |
 
 程序首次启动时会在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\SystemToolbox` 写入卸载注册信息，可在系统“设置 → 应用 → 安装的应用”中看到并直接卸载（调用 `system-toolbox.exe /uninstall`）；主菜单 91 提供同样的卸载流程。卸载会删除该注册表项、`%LOCALAPPDATA%\SystemToolbox` 数据目录（含 DLC、报告、下载缓存）与程序 EXE 文件本身，需输入 `UNINSTALL` 确认；不会删除用户另存的文件，已修改的系统设置（休眠、服务、用户 PATH 等）不会自动还原。
@@ -139,7 +153,7 @@ Windows x64、Node.js 18+：执行 `npm install system-toolbox`，然后用 `npx
 
 #### MinGW-w64 编译命令
 ```bash
-g++ -o system-toolbox.exe system-toolbox.cpp -std=c++17 -O2 -fexec-charset=UTF-8 -finput-charset=UTF-8 -lws2_32 -lshell32 -ladvapi32 -lole32 -lcrypt32 -lopengl32 -ld3d11 -ldxgi -lgdi32 -luser32 -pthread -static
+g++ -o system-toolbox.exe system-toolbox.cpp -std=c++17 -O2 -fexec-charset=UTF-8 -finput-charset=UTF-8 -lws2_32 -lshell32 -ladvapi32 -lole32 -lcrypt32 -lopengl32 -ld3d11 -ldxgi -lgdi32 -luser32 -lwbemuuid -loleaut32 -lsetupapi -pthread -static
 ```
 
 在项目目录内运行，输出文件使用相对路径；部分 MinGW 链接器不支持包含中文的绝对输出路径。

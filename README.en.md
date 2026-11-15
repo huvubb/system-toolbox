@@ -10,9 +10,13 @@
 
 **System Toolbox** is a free, open-source maintenance toolbox for **Windows 10/11** that consolidates system maintenance, software installation, fast downloads, audio conversion, and disk management into a single console. It is written in C++17/20, released under the MIT license, and is fully portable — extract and run.
 
-[⬇️ Download v1.10.5 (ZIP)](https://github.com/huvubb/system-toolbox/releases/download/v1.10.5/system-toolbox-windows.zip) · [Release notes & checksums](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.5) · [Website](https://huvubb.github.io/system-toolbox/)
+[⬇️ Download v1.10.7 (ZIP)](https://github.com/huvubb/system-toolbox/releases/download/v1.10.7/system-toolbox-windows.zip) · [Release notes & checksums](https://github.com/huvubb/system-toolbox/releases/tag/v1.10.7) · [Website](https://huvubb.github.io/system-toolbox/)
 
 ---
+
+## ✨ What's new in v1.10.7
+
+- **Hardware realtime monitor (menu 39)** powered by a self-built engine loaded at startup (WMI only as fallback): curl-style refreshable panel with CPU load, memory usage, ACPI thermal-zone temps (native IOCTL), NVIDIA GPU temps (NvAPI), and disk temps (NVMe SMART/Health log read directly, SATA SMART attributes 194/190); RAM slot usage/total with per-module details from SMBIOS; storage slots enumerated over IDE/SATA/USB/NVMe plus CD-ROM drives and SMBIOS board slots (NGFF/mSATA/SATA/IDE, unknown types shown as 0/0); RAM read/write/copy benchmark.
 
 ## ✨ What's new in v1.10.5
 

@@ -46,7 +46,10 @@ bool g_bModeInitialized = false;
 #include <cmath>
 #include <thread>
 #include <atomic>
+#include <map>
 #include <gl/gl.h>
+#include <wbemidl.h> // WMI COM（硬件监测：热区温度兜底）
+#include <setupapi.h> // 设备接口枚举（原生 ACPI 热区）
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "opengl32.lib")
@@ -57,6 +60,9 @@ bool g_bModeInitialized = false;
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "crypt32.lib")
+#pragma comment(lib, "wbemuuid.lib") // WMI
+#pragma comment(lib, "oleaut32.lib") // BSTR
+#pragma comment(lib, "setupapi.lib") // 设备枚举
 
 // ====================================================================
 // 基础工具函数
@@ -834,6 +840,8 @@ void MemoryBandwidthMenu();
 void GpuStressSubMenu();
 void CpuAiBenchmark();
 void AiComputeMenu();
+void HardwareMonitorMenu();
+void InitHardwareEngine();
 
 
 // GPU 工具
@@ -1067,6 +1075,9 @@ int main()
     // 注册/刷新卸载信息（首次启动即写入，供系统识别与卸载）
     RegisterUninstallEntry();
 
+    // 自研硬件监测引擎：启动时加载（SMBIOS 插槽/磁盘枚举/原生热区/NvAPI）
+    InitHardwareEngine();
+
     // PE/RE 自动检测
     if (IsInPeOrRe())
     {
@@ -1173,6 +1184,7 @@ int main()
         std::cout << "36. 系统诊断与报告（电池/睡眠/蓝屏/更新/软件）\n";
         std::cout << "37. DirectX 与 DLL 修复\n";
         std::cout << "38. AI 算力测试（CPU/GPU GFLOPS、INT8、内存带宽）\n";
+        std::cout << "39. 硬件实时监测（温度/负载/内存/插槽）\n";
         std::cout << "90. 切换在线/离线模式\n";
         std::cout << "91. 卸载本工具箱\n";
         std::cout << " 0. 退出程序\n";
@@ -1237,6 +1249,7 @@ int main()
             case 36: DiagnosticsMenu(); break;
             case 37: DirectXRepairMenu(); break;
             case 38: AiComputeMenu(); break;
+            case 39: HardwareMonitorMenu(); break;
 
             case 90:  // 切换模式
                 ToggleMode();
@@ -2789,6 +2802,1035 @@ void AiComputeMenu()
             GpuAiComputeTest();
             MemoryBandwidthMenu();
         }
+        else { std::cout << "无效选项。" << std::endl; Pause(); }
+    }
+}
+
+// ==================== 硬件实时监测（WMI） ====================
+
+// 宽字符转 UTF-8（控制台为 UTF-8 输出）
+std::string WideToUtf8Text(const std::wstring& wide)
+{
+    if (wide.empty()) return "";
+    int len = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+    std::string result(len, '\0');
+    if (len) WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()), &result[0], len, nullptr, nullptr);
+    return result;
+}
+
+// COM 初始化（整个进程只做一次；重复调用 CoInitializeSecurity 会被忽略并打印错误，此处直接忽略返回值）
+void EnsureComInitialized()
+{
+    static bool initialized = false;
+    if (!initialized)
+    {
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        CoInitializeSecurity(nullptr, -1, nullptr, nullptr,
+            RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE, nullptr);
+        initialized = true;
+    }
+}
+
+struct WmiSession
+{
+    IWbemServices* services = nullptr;
+};
+
+// 连接 WMI 命名空间
+bool WmiConnect(WmiSession& session, const wchar_t* namespaceName)
+{
+    IWbemLocator* locator = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (void**)&locator)))
+        return false;
+    BSTR ns = SysAllocString(namespaceName);
+    HRESULT hr = locator->ConnectServer(ns, nullptr, nullptr, nullptr, 0, nullptr, nullptr, &session.services);
+    SysFreeString(ns);
+    locator->Release();
+    if (FAILED(hr)) { session.services = nullptr; return false; }
+    CoSetProxyBlanket(session.services, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr,
+        RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
+    return true;
+}
+
+void WmiClose(WmiSession& session)
+{
+    if (session.services) { session.services->Release(); session.services = nullptr; }
+}
+
+// 读取 WMI 对象的字符串属性
+std::string WmiGetString(IWbemClassObject* obj, const wchar_t* prop)
+{
+    VARIANT value;
+    VariantInit(&value);
+    std::string result;
+    if (SUCCEEDED(obj->Get(prop, 0, &value, nullptr, nullptr)) && value.vt == VT_BSTR && value.bstrVal)
+        result = WideToUtf8Text(value.bstrVal);
+    VariantClear(&value);
+    return result;
+}
+
+// 读取 WMI 对象的整数属性（不存在或类型不符返回 false）
+bool WmiGetUint32(IWbemClassObject* obj, const wchar_t* prop, unsigned long& out)
+{
+    VARIANT value;
+    VariantInit(&value);
+    bool ok = SUCCEEDED(obj->Get(prop, 0, &value, nullptr, nullptr))
+        && (value.vt == VT_I4 || value.vt == VT_UI4 || value.vt == VT_UINT);
+    if (ok) out = static_cast<unsigned long>(value.lVal);
+    VariantClear(&value);
+    return ok;
+}
+
+// 执行 WQL，对每个结果对象调用 visitor；返回对象数量（-1 表示查询失败）
+typedef void (*WmiObjectVisitor)(IWbemClassObject* obj, void* context);
+int WmiForEach(const WmiSession& session, const wchar_t* wql, WmiObjectVisitor visitor, void* context)
+{
+    if (!session.services) return -1;
+    IEnumWbemClassObject* enumerator = nullptr;
+    BSTR lang = SysAllocString(L"WQL");
+    BSTR query = SysAllocString(wql);
+    HRESULT hr = session.services->ExecQuery(lang, query, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &enumerator);
+    SysFreeString(lang);
+    SysFreeString(query);
+    if (FAILED(hr)) return -1;
+    int count = 0;
+    for (;;)
+    {
+        IWbemClassObject* batch[8] = {};
+        ULONG fetched = 0;
+        HRESULT step = enumerator->Next(WBEM_INFINITE, 8, batch, &fetched);
+        if (FAILED(step) || fetched == 0) break;
+        for (ULONG i = 0; i < fetched; ++i)
+        {
+            visitor(batch[i], context);
+            batch[i]->Release();
+            ++count;
+        }
+    }
+    enumerator->Release();
+    return count;
+}
+
+// ==================== 自研硬件监测引擎（启动时加载；WMI 仅作温度兜底） ====================
+
+std::string ToLowerAscii(std::string text);
+void InitHardwareEngine();
+
+struct HwRamModule
+{
+    std::string locator, maker, part;
+    double gigaBytes = 0.0;
+    unsigned long speed = 0; // MT/s（标称）
+    bool occupied = false;
+};
+
+struct HwBoardSlot
+{
+    std::string designation;
+    std::string kind; // M.2/NGFF、mSATA、SATA、IDE、PCIe 等
+    bool used = false;
+};
+
+struct HwDisk
+{
+    int index = 0;
+    std::string model;
+    std::string bus; // NVMe / SATA / IDE / USB / RAID / SCSI
+    unsigned long long bytes = 0;
+};
+
+struct HwCdrom
+{
+    int index = 0;
+    std::string model;
+    std::string bus;
+    std::string letter; // 盘符（如 E:）
+};
+
+struct HwGpu
+{
+    std::string name;
+    unsigned long handle = 0;
+};
+
+struct HwEngine
+{
+    bool ready = false;
+    // 内存（SMBIOS）
+    int ramSlotsTotal = 0;
+    bool ramHasSlots = false;
+    unsigned long long ramMaxBytes = 0;
+    bool ramHasMax = false;
+    std::vector<HwRamModule> ramModules;
+    // 磁盘与光驱
+    std::vector<HwDisk> disks;
+    std::vector<HwCdrom> cdroms;
+    // 主板插槽
+    std::vector<HwBoardSlot> slots;
+    // 温度区（原生 ACPI 热区接口，启动时枚举设备路径）
+    struct ThermalZonePath { std::string name; std::wstring path; };
+    std::vector<ThermalZonePath> thermalZones;
+    // GPU（NVIDIA NvAPI 动态加载）
+    bool nvapiReady = false;
+    std::vector<HwGpu> gpus;
+};
+
+HwEngine& GetHardwareEngine() { static HwEngine engine; return engine; }
+
+std::string SmbiosStringAt(const BYTE* strings, const BYTE* end, BYTE index)
+{
+    if (!index) return "";
+    const BYTE* s = strings;
+    for (BYTE i = 1; i < index && s < end && *s; ++i) s += strlen(reinterpret_cast<const char*>(s)) + 1;
+    if (s >= end) return "";
+    return std::string(reinterpret_cast<const char*>(s));
+}
+
+// 解析 SMBIOS 表：内存插槽（Type 16/17）、主板插槽（Type 9）
+void ParseSmbiosIntoEngine(HwEngine& engine)
+{
+    const DWORD firmwareSignature = 0x524D5342; // 'RSMB'（MSB 在前的多字符常量）
+    DWORD size = GetSystemFirmwareTable(firmwareSignature, 0, nullptr, 0);
+    if (!size) return;
+    std::vector<BYTE> buffer(size);
+    if (GetSystemFirmwareTable(firmwareSignature, 0, buffer.data(), size) != size) return;
+    if (buffer.size() < 8) return;
+    DWORD tableLength = *reinterpret_cast<DWORD*>(&buffer[4]);
+    const BYTE* p = buffer.data() + 8;
+    const BYTE* end = p + tableLength;
+    while (p + 4 <= end && p[0] != 127)
+    {
+        BYTE type = p[0], len = p[1];
+        const BYTE* strings = p + len;
+        const BYTE* q = strings;
+        while (q + 1 < end && !(q[0] == 0 && q[1] == 0)) ++q;
+        const BYTE* next = (q + 2 <= end) ? q + 2 : end;
+
+        if (type == 16 && len >= 0x10) // 内存阵列：插槽总数与最大容量
+        {
+            engine.ramSlotsTotal += *reinterpret_cast<const unsigned short*>(p + 0x0D);
+            engine.ramHasSlots = true;
+            DWORD maxCap = *reinterpret_cast<const DWORD*>(p + 0x07);
+            if (maxCap == 0x80000000u && len >= 0x17)
+            {
+                engine.ramMaxBytes += *reinterpret_cast<const unsigned long long*>(p + 0x0F);
+                engine.ramHasMax = true;
+            }
+            else if (maxCap)
+            {
+                engine.ramMaxBytes += static_cast<unsigned long long>(maxCap) * 1024;
+                engine.ramHasMax = true;
+            }
+        }
+        else if (type == 17 && len >= 0x15) // 内存设备：每个插槽一条（Size=0 表示空插槽）
+        {
+            HwRamModule module;
+            WORD sizeWord = *reinterpret_cast<const unsigned short*>(p + 0x0C);
+            module.occupied = sizeWord != 0;
+            if (module.occupied)
+                module.gigaBytes = (sizeWord & 0x8000) ? (sizeWord & 0x7FFF) / 1024.0 : sizeWord / 1024.0;
+            module.locator = SmbiosStringAt(strings, end, p[0x10]);
+            module.maker = SmbiosStringAt(strings, end, p[0x11]);
+            module.part = SmbiosStringAt(strings, end, p[0x1A]);
+            if (len >= 0x17) module.speed = *reinterpret_cast<const unsigned short*>(p + 0x15);
+            engine.ramModules.push_back(module);
+        }
+        else if (type == 9 && len >= 0x0C) // 系统插槽（常见长度 0x0C/0x0D/0x0F）
+        {
+            HwBoardSlot slot;
+            slot.designation = SmbiosStringAt(strings, end, p[0x04]);
+            BYTE slotType = p[0x05];
+            slot.used = p[0x07] == 4;
+            const char* typeName = "其他插槽";
+            if (slotType == 0x05 || slotType == 0x10 || (slotType >= 0x11 && slotType <= 0x1F)
+                || (slotType >= 0x30 && slotType <= 0x32)) typeName = "PCIe 插槽";
+            else if (slotType >= 0x33 && slotType <= 0x38) typeName = "M.2/NGFF 插槽";
+            std::string lower = ToLowerAscii(slot.designation);
+            if (lower.find("msata") != std::string::npos) slot.kind = "mSATA 插槽";
+            else if (lower.find("m.2") != std::string::npos || lower.find("ngff") != std::string::npos) slot.kind = "M.2/NGFF 插槽";
+            else if (lower.find("sata") != std::string::npos) slot.kind = "SATA 插槽";
+            else if (lower.find("ide") != std::string::npos || lower.find("pata") != std::string::npos) slot.kind = "IDE 插槽";
+            else slot.kind = typeName;
+            if (!slot.designation.empty()) engine.slots.push_back(slot);
+        }
+        p = next;
+    }
+}
+
+std::string StorageBusName(DWORD busType)
+{
+    switch (busType)
+    {
+        case 1: return "SCSI";
+        case 2: return "ATAPI";
+        case 3: return "IDE";
+        case 7: return "USB";
+        case 8: return "RAID";
+        case 10: return "SAS";
+        case 11: return "SATA";
+        case 17: return "NVMe";
+        default: return "其他";
+    }
+}
+
+// 通过 StorageDeviceDescriptor 读取设备型号与总线类型
+std::string QueryStorageModelAndBus(HANDLE handle, std::string& busOut)
+{
+    char buffer[4096] = {};
+    STORAGE_PROPERTY_QUERY query{};
+    query.PropertyId = StorageDeviceProperty;
+    query.QueryType = PropertyStandardQuery;
+    DWORD returned = 0;
+    if (!DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query), buffer, sizeof(buffer), &returned, nullptr))
+        return "";
+    auto* descriptor = reinterpret_cast<STORAGE_DEVICE_DESCRIPTOR*>(buffer);
+    auto readOffsetString = [&](DWORD offset) -> std::string {
+        if (!offset || offset >= returned) return "";
+        return std::string(buffer + offset);
+    };
+    std::string model = readOffsetString(descriptor->ProductIdOffset);
+    std::string vendor = readOffsetString(descriptor->VendorIdOffset);
+    busOut = StorageBusName(descriptor->BusType);
+    std::string full = vendor.empty() ? model : vendor + " " + model;
+    return TrimSettingText(full);
+}
+
+void EnumerateDisksIntoEngine(HwEngine& engine)
+{
+    for (int i = 0; i < 32; ++i)
+    {
+        std::wstring path = L"\\\\.\\PhysicalDrive" + std::to_wstring(i);
+        HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) break; // 物理盘编号连续，断开即止
+        HwDisk disk;
+        disk.index = i;
+        std::string bus;
+        disk.model = QueryStorageModelAndBus(handle, bus);
+        disk.bus = bus;
+        DWORD returned = 0;
+        LARGE_INTEGER length{};
+        if (DeviceIoControl(handle, IOCTL_DISK_GET_LENGTH_INFO, nullptr, 0, &length, sizeof(length), &returned, nullptr))
+            disk.bytes = static_cast<unsigned long long>(length.QuadPart);
+        CloseHandle(handle);
+        engine.disks.push_back(disk);
+    }
+    for (int i = 0; i < 16; ++i)
+    {
+        std::wstring path = L"\\\\.\\CdRom" + std::to_wstring(i);
+        HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) continue; // 光驱编号可能不连续
+        HwCdrom cdrom;
+        cdrom.index = i;
+        std::string bus;
+        cdrom.model = QueryStorageModelAndBus(handle, bus);
+        cdrom.bus = bus;
+        CloseHandle(handle);
+        for (wchar_t letter = L'D'; letter <= L'Z'; ++letter)
+        {
+            wchar_t dosName[3] = { letter, L':', 0 };
+            wchar_t target[512] = L"";
+            std::wstring expect = L"\\CdRom" + std::to_wstring(i);
+            if (QueryDosDeviceW(dosName, target, 512) && wcsstr(target, expect.c_str()))
+                cdrom.letter = WideToUtf8Text(std::wstring(1, letter) + L":");
+        }
+        engine.cdroms.push_back(cdrom);
+    }
+}
+
+// NVIDIA NvAPI 动态加载（显卡温度，无需 nvidia-smi 进程）
+struct NvApiFunctions
+{
+    bool ready = false;
+    void* (__cdecl* queryInterface)(unsigned long) = nullptr;
+    unsigned long (__cdecl* initialize)() = nullptr;
+    unsigned long (__cdecl* enumPhysicalGpus)(unsigned long*, unsigned long*) = nullptr;
+    unsigned long (__cdecl* getThermalSettings)(unsigned long, unsigned long, void*) = nullptr;
+    unsigned long (__cdecl* getFullName)(unsigned long, wchar_t*) = nullptr;
+};
+
+NvApiFunctions& GetNvApiFuncs()
+{
+    static NvApiFunctions nv;
+    return nv;
+}
+
+void LoadNvApiIntoEngine(HwEngine& engine)
+{
+    NvApiFunctions& nv = GetNvApiFuncs();
+    if (nv.ready) { engine.nvapiReady = true; return; }
+    HMODULE module = LoadLibraryW(L"nvapi64.dll");
+    if (!module) return;
+    nv.queryInterface = reinterpret_cast<void* (__cdecl*)(unsigned long)>(GetProcAddress(module, "nvapi_QueryInterface"));
+    if (!nv.queryInterface) return;
+    nv.initialize = reinterpret_cast<unsigned long (__cdecl*)()>(nv.queryInterface(0x0150E828));
+    nv.enumPhysicalGpus = reinterpret_cast<unsigned long (__cdecl*)(unsigned long*, unsigned long*)>(nv.queryInterface(0xE5AC921F));
+    nv.getThermalSettings = reinterpret_cast<unsigned long (__cdecl*)(unsigned long, unsigned long, void*)>(nv.queryInterface(0xE3640A56));
+    nv.getFullName = reinterpret_cast<unsigned long (__cdecl*)(unsigned long, wchar_t*)>(nv.queryInterface(0xCEEE8E9F));
+    if (!nv.initialize || !nv.enumPhysicalGpus || !nv.getThermalSettings) return;
+    if (nv.initialize() != 0) return;
+    unsigned long handles[64] = {};
+    unsigned long count = 0;
+    if (nv.enumPhysicalGpus(handles, &count) != 0) return;
+    for (unsigned long i = 0; i < count && i < 64; ++i)
+    {
+        HwGpu gpu;
+        gpu.handle = handles[i];
+        wchar_t name[64] = L"";
+        if (nv.getFullName && nv.getFullName(handles[i], name) == 0 && name[0])
+            gpu.name = WideToUtf8Text(name);
+        engine.gpus.push_back(gpu);
+    }
+    nv.ready = true;
+    engine.nvapiReady = true;
+}
+
+// NVMe SMART/Health 日志温度（原生协议命令，开尔文 → 摄氏）
+bool ReadNvmeTemperature(HANDLE handle, double& celsiusOut)
+{
+#pragma pack(push, 1)
+    struct ProtocolData
+    {
+        DWORD protocolType, dataType, requestValue, requestSubValue;
+        DWORD dataOffset, dataLength, fixedReturn, reserved[3];
+    };
+#pragma pack(pop)
+    const DWORD additionalOffset = FIELD_OFFSET(STORAGE_PROPERTY_QUERY, AdditionalParameters);
+    std::vector<BYTE> buffer(additionalOffset + sizeof(ProtocolData) + 512, 0);
+    auto* query = reinterpret_cast<STORAGE_PROPERTY_QUERY*>(buffer.data());
+    query->PropertyId = static_cast<STORAGE_PROPERTY_ID>(50); // StorageDeviceProtocolSpecificProperty
+    query->QueryType = PropertyStandardQuery;
+    auto* protocol = reinterpret_cast<ProtocolData*>(buffer.data() + additionalOffset);
+    protocol->protocolType = 3;      // ProtocolTypeNVMe
+    protocol->dataType = 2;          // NVMeDataTypeLogPage
+    protocol->requestValue = 0x02;   // SMART/Health 日志页
+    protocol->requestSubValue = 0;   // 全局命名空间
+    protocol->dataOffset = sizeof(ProtocolData);
+    protocol->dataLength = 512;
+    DWORD returned = 0;
+    if (!DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, buffer.data(), static_cast<DWORD>(buffer.size()),
+        buffer.data(), static_cast<DWORD>(buffer.size()), &returned, nullptr))
+        return false;
+    const BYTE* log = buffer.data() + additionalOffset + sizeof(ProtocolData);
+    unsigned composite = log[1] | (log[2] << 8); // 复合温度（开尔文）
+    if (composite < 200 || composite > 400) return false;
+    celsiusOut = composite - 273.15;
+    return true;
+}
+
+// SMART 读取温度（SATA/IDE，也兼容部分转译 NVMe；属性 194/190）
+bool ReadSmartTemperature(const std::wstring& devicePath, int driveIndex, double& celsiusOut)
+{
+#pragma pack(push, 1)
+    struct SmartRegs { BYTE features, sectorCount, sectorNumber, cylLow, cylHigh, driveHead, command, reserved; };
+    struct SendCmdInParams { DWORD bufferSize; SmartRegs regs; BYTE driveNumber; BYTE reserved[3]; DWORD pad[4]; BYTE data[1]; };
+    struct SendCmdOutParams { DWORD bufferSize; BYTE driverError, ideError, reserved[2]; DWORD pad[2]; BYTE reserved2[6]; BYTE data[1]; };
+#pragma pack(pop)
+    HANDLE handle = CreateFileW(devicePath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    std::vector<BYTE> outBuffer(sizeof(SendCmdOutParams) + 512, 0);
+    std::vector<BYTE> inBuffer(sizeof(SendCmdInParams) + 512, 0);
+    auto* in = reinterpret_cast<SendCmdInParams*>(inBuffer.data());
+    in->bufferSize = 512;
+    in->regs.features = 0xD0;        // SMART READ DATA
+    in->regs.sectorNumber = 1;
+    in->regs.cylLow = 0x4F;
+    in->regs.cylHigh = 0xC2;
+    in->regs.driveHead = 0xA0 | static_cast<BYTE>((driveIndex & 1) << 4);
+    in->regs.command = 0xB0;         // SMART 命令
+    in->driveNumber = static_cast<BYTE>(driveIndex);
+    DWORD returned = 0;
+    bool ok = DeviceIoControl(handle, SMART_RCV_DRIVE_DATA, inBuffer.data(),
+        static_cast<DWORD>(inBuffer.size()), outBuffer.data(), static_cast<DWORD>(outBuffer.size()), &returned, nullptr);
+    CloseHandle(handle);
+    if (!ok) return false;
+    auto* out = reinterpret_cast<SendCmdOutParams*>(outBuffer.data());
+    const BYTE* table = out->data;
+    for (int attr = 0; attr < 30; ++attr)
+    {
+        const BYTE* record = table + 2 + attr * 12;
+        BYTE id = record[0];
+        if (id == 0) break;
+        if (id == 194 || id == 190)
+        {
+            // raw 区从 record+4 开始，温度通常在首字节；个别盘在倒数第二字节
+            for (BYTE candidate : {record[4], record[5], record[9]})
+            {
+                if (candidate > 0 && candidate < 100)
+                {
+                    celsiusOut = candidate;
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// 引擎读磁盘温度：NVMe 走协议命令，其余走 SMART
+bool ReadEngineDiskTemperature(const HwDisk& disk, double& celsiusOut)
+{
+    std::wstring path = L"\\\\.\\PhysicalDrive" + std::to_wstring(disk.index);
+    if (disk.bus == "NVMe")
+    {
+        HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (handle != INVALID_HANDLE_VALUE)
+        {
+            bool ok = ReadNvmeTemperature(handle, celsiusOut);
+            CloseHandle(handle);
+            if (ok) return true;
+        }
+    }
+    return ReadSmartTemperature(path, disk.index, celsiusOut);
+}
+
+// 枚举原生 ACPI 热区设备（Windows 热区接口；失败则由调用方回退 WMI）
+static const GUID ThermalDeviceInterfaceGuid = { 0x47FAA02C, 0x3E38, 0x4D79, {0xAF, 0x50, 0xD9, 0xEB, 0xB3, 0xD9, 0xE9, 0xAD} };
+
+void EnumerateThermalZonesIntoEngine(HwEngine& engine)
+{
+    HDEVINFO deviceInfo = SetupDiGetClassDevsW(&ThermalDeviceInterfaceGuid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (deviceInfo == INVALID_HANDLE_VALUE) return;
+    for (DWORD i = 0; i < 16; ++i)
+    {
+        SP_DEVICE_INTERFACE_DATA interfaceData{};
+        interfaceData.cbSize = sizeof(interfaceData);
+        if (!SetupDiEnumDeviceInterfaces(deviceInfo, nullptr, &ThermalDeviceInterfaceGuid, i, &interfaceData))
+            break;
+        DWORD required = 0;
+        SetupDiGetDeviceInterfaceDetailW(deviceInfo, &interfaceData, nullptr, 0, &required, nullptr);
+        if (!required) continue;
+        std::vector<BYTE> detailBuffer(required, 0);
+        auto* detail = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(detailBuffer.data());
+        detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+        SP_DEVINFO_DATA deviceData{};
+        deviceData.cbSize = sizeof(deviceData);
+        if (!SetupDiGetDeviceInterfaceDetailW(deviceInfo, &interfaceData, detail, required, nullptr, &deviceData))
+            continue;
+        wchar_t friendly[256] = L"";
+        SetupDiGetDeviceRegistryPropertyW(deviceInfo, &deviceData, SPDRP_FRIENDLYNAME, nullptr,
+            reinterpret_cast<PBYTE>(friendly), sizeof(friendly), nullptr);
+        HwEngine::ThermalZonePath zone;
+        zone.name = WideToUtf8Text(friendly[0] ? friendly : detail->DevicePath);
+        zone.path = detail->DevicePath;
+        engine.thermalZones.push_back(zone);
+    }
+    SetupDiDestroyDeviceInfoList(deviceInfo);
+}
+
+// 引擎读取 ACPI 热区温度（°C），失败返回 false
+bool ReadEngineThermalZone(const HwEngine::ThermalZonePath& zone, double& celsiusOut)
+{
+    HANDLE handle = CreateFileW(zone.path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    DWORD temperature = 0, returned = 0;
+    BOOL ok = DeviceIoControl(handle, CTL_CODE(FILE_DEVICE_UNKNOWN, 0x027, METHOD_BUFFERED, FILE_READ_ACCESS),
+        nullptr, 0, &temperature, sizeof(temperature), &returned, nullptr);
+    CloseHandle(handle);
+    if (!ok || temperature == 0) return false;
+    celsiusOut = temperature / 10.0 - 273.15;
+    return celsiusOut > -40 && celsiusOut < 130;
+}
+
+// SMBIOS 直读不可用时（如 GetSystemFirmwareTable 返回 ERROR_INVALID_FUNCTION），用 WMI 填充同样的数据结构
+void CollectWmiRamArray(IWbemClassObject* obj, void* context)
+{
+    auto* engine = static_cast<HwEngine*>(context);
+    unsigned long devices = 0;
+    if (WmiGetUint32(obj, L"MemoryDevices", devices)) { engine->ramSlotsTotal += devices; engine->ramHasSlots = true; }
+    VARIANT value;
+    VariantInit(&value);
+    for (const wchar_t* prop : {L"MaxCapacityEx", L"MaxCapacity"})
+    {
+        if (SUCCEEDED(obj->Get(prop, 0, &value, nullptr, nullptr)) && value.vt != VT_NULL)
+        {
+            unsigned long long kb = 0;
+            if (value.vt == VT_BSTR && value.bstrVal) kb = wcstoull(value.bstrVal, nullptr, 10);
+            else if (value.vt == VT_I4 || value.vt == VT_UI4) kb = static_cast<unsigned long long>(value.lVal);
+            if (kb > 0) { engine->ramMaxBytes += kb * 1024ull; engine->ramHasMax = true; }
+        }
+        VariantClear(&value);
+        if (engine->ramHasMax) break;
+    }
+}
+
+void CollectWmiRamModule(IWbemClassObject* obj, void* context)
+{
+    auto* engine = static_cast<HwEngine*>(context);
+    HwRamModule module;
+    module.occupied = true; // Win32_PhysicalMemory 只返回已安装的模块
+    module.locator = TrimSettingText(WmiGetString(obj, L"DeviceLocator"));
+    module.maker = TrimSettingText(WmiGetString(obj, L"Manufacturer"));
+    module.part = TrimSettingText(WmiGetString(obj, L"PartNumber"));
+    VARIANT value;
+    VariantInit(&value);
+    if (SUCCEEDED(obj->Get(L"Capacity", 0, &value, nullptr, nullptr)) && value.vt != VT_NULL)
+    {
+        unsigned long long bytes = 0;
+        if (value.vt == VT_BSTR && value.bstrVal) bytes = wcstoull(value.bstrVal, nullptr, 10);
+        else if (value.vt == VT_I4 || value.vt == VT_UI4) bytes = static_cast<unsigned long long>(value.lVal);
+        module.gigaBytes = bytes / (1024.0 * 1024 * 1024);
+    }
+    VariantClear(&value);
+    unsigned long speed = 0;
+    if (WmiGetUint32(obj, L"ConfiguredClockSpeed", speed) && speed) module.speed = speed;
+    else if (WmiGetUint32(obj, L"Speed", speed) && speed) module.speed = speed;
+    engine->ramModules.push_back(module);
+}
+
+void CollectWmiSystemSlot(IWbemClassObject* obj, void* context)
+{
+    auto* engine = static_cast<HwEngine*>(context);
+    HwBoardSlot slot;
+    slot.designation = TrimSettingText(WmiGetString(obj, L"SlotDesignation"));
+    unsigned long usage = 0;
+    WmiGetUint32(obj, L"CurrentUsage", usage);
+    slot.used = usage == 4;
+    std::string lower = ToLowerAscii(slot.designation);
+    if (lower.find("msata") != std::string::npos) slot.kind = "mSATA 插槽";
+    else if (lower.find("m.2") != std::string::npos || lower.find("ngff") != std::string::npos) slot.kind = "M.2/NGFF 插槽";
+    else if (lower.find("sata") != std::string::npos) slot.kind = "SATA 插槽";
+    else if (lower.find("ide") != std::string::npos || lower.find("pata") != std::string::npos) slot.kind = "IDE 插槽";
+    else slot.kind = "其他插槽";
+    if (!slot.designation.empty()) engine->slots.push_back(slot);
+}
+
+void FillEngineSlotsFromWmi(HwEngine& engine)
+{
+    EnsureComInitialized();
+    WmiSession session;
+    if (!WmiConnect(session, L"ROOT\\CIMV2")) return;
+    WmiForEach(session, L"SELECT MemoryDevices, MaxCapacityEx, MaxCapacity FROM Win32_PhysicalMemoryArray",
+        &CollectWmiRamArray, &engine);
+    WmiForEach(session, L"SELECT DeviceLocator, Capacity, Speed, ConfiguredClockSpeed, Manufacturer, PartNumber FROM Win32_PhysicalMemory",
+        &CollectWmiRamModule, &engine);
+    WmiForEach(session, L"SELECT SlotDesignation, Description, CurrentUsage, Tag FROM Win32_SystemSlot",
+        &CollectWmiSystemSlot, &engine);
+    WmiClose(session);
+}
+
+void InitHardwareEngine()
+{
+    HwEngine& engine = GetHardwareEngine();
+    if (engine.ready) return;
+    ParseSmbiosIntoEngine(engine);
+    if (!engine.ramHasSlots && engine.ramModules.empty())
+        FillEngineSlotsFromWmi(engine); // SMBIOS 直读不可用时的兜底
+    EnumerateDisksIntoEngine(engine);
+    EnumerateThermalZonesIntoEngine(engine);
+    LoadNvApiIntoEngine(engine);
+    engine.ready = true;
+}
+
+struct ThermalZoneInfo
+{
+    std::string name;
+    double celsius = 0.0;
+    bool valid = false;
+};
+
+void CollectThermalZone(IWbemClassObject* obj, void* context)
+{
+    auto* zones = static_cast<std::vector<ThermalZoneInfo>*>(context);
+    ThermalZoneInfo zone;
+    zone.name = WmiGetString(obj, L"InstanceName");
+    if (zone.name.empty()) zone.name = "热区";
+    unsigned long temp = 0;
+    if (WmiGetUint32(obj, L"CurrentTemperature", temp) && temp > 0)
+    {
+        zone.celsius = temp / 10.0 - 273.15; // 单位为 0.1 开尔文
+        zone.valid = zone.celsius > -40 && zone.celsius < 130;
+    }
+    zones->push_back(zone);
+}
+
+// 读取单个磁盘可靠性计数器里的温度（ASSOCIATORS 查询结果）
+void CollectSingleTemperature(IWbemClassObject* obj, void* context)
+{
+    auto* out = static_cast<std::vector<double>*>(context);
+    unsigned long temp = 0;
+    if (WmiGetUint32(obj, L"Temperature", temp) && temp > 0)
+    {
+        double celsius = temp > 120 ? temp - 273.15 : static_cast<double>(temp); // 部分驱动返回开尔文
+        if (celsius > -20 && celsius < 120) out->push_back(celsius);
+    }
+}
+
+// 内存插槽信息（自研引擎：SMBIOS 直读，占用/总数 + 每根模块详情）
+void MemorySlotInfo()
+{
+    ClearScreen();
+    std::cout << "========== 内存插槽信息 ==========\n\n";
+    HwEngine& engine = GetHardwareEngine();
+    if (!engine.ready) InitHardwareEngine();
+
+    int occupied = 0;
+    for (const auto& module : engine.ramModules)
+        if (module.occupied) ++occupied;
+
+    if (engine.ramHasSlots)
+        std::cout << "内存插槽: " << occupied << " / " << engine.ramSlotsTotal << "（占用 / 总数）\n";
+    else
+        std::cout << "内存插槽: " << occupied << " / ?（本机 SMBIOS 未报告插槽总数）\n";
+    if (engine.ramHasMax && engine.ramMaxBytes > 0)
+        std::cout << "主板内存最大支持: " << engine.ramMaxBytes / (1024ull * 1024 * 1024) << " GB\n";
+    for (const auto& module : engine.ramModules)
+    {
+        std::cout << "  " << (module.locator.empty() ? "插槽" : module.locator) << ": ";
+        if (module.occupied)
+        {
+            std::cout << std::fixed << std::setprecision(1) << module.gigaBytes << " GB";
+            if (module.speed) std::cout << " @ " << module.speed << " MT/s";
+            if (!module.maker.empty()) std::cout << "  " << module.maker;
+            if (!module.part.empty()) std::cout << "  " << module.part;
+        }
+        else
+        {
+            std::cout << "空插槽";
+        }
+        std::cout << "\n";
+    }
+    if (engine.ramModules.empty()) std::cout << "  本机 SMBIOS 未报告内存插槽信息。\n";
+    Pause();
+}
+
+// 硬盘与存储插槽（自研引擎：IDE/SATA/mSATA/CD-ROM/NVMe/NGFF 分类 + SMBIOS 插槽占用/空闲）
+void DiskSlotInfo()
+{
+    ClearScreen();
+    std::cout << "========== 硬盘与存储插槽 ==========\n\n";
+    HwEngine& engine = GetHardwareEngine();
+    if (!engine.ready) InitHardwareEngine();
+
+    // 磁盘按总线归类
+    std::vector<HwDisk> nvmeDisks, sataDisks, ideDisks, usbDisks, otherDisks;
+    for (const auto& disk : engine.disks)
+    {
+        std::string busLower = ToLowerAscii(disk.bus);
+        if (busLower == "nvme") nvmeDisks.push_back(disk);
+        else if (busLower == "usb") usbDisks.push_back(disk);
+        else if (busLower == "sata" || busLower == "scsi" || busLower == "raid" || busLower == "sas") sataDisks.push_back(disk);
+        else if (busLower == "ide" || busLower == "atapi") ideDisks.push_back(disk);
+        else otherDisks.push_back(disk);
+    }
+
+    // SMBIOS 插槽归类
+    int msataTotal = 0, msataUsed = 0, ngffTotal = 0, ngffUsed = 0;
+    int sataSlotTotal = 0, sataSlotUsed = 0, ideSlotTotal = 0, ideSlotUsed = 0;
+    int genericSlotTotal = 0, genericSlotUsed = 0;
+    std::string genericUsedNames;
+    for (const auto& slot : engine.slots)
+    {
+        bool used = slot.used;
+        if (slot.kind == "mSATA 插槽") { ++msataTotal; if (used) ++msataUsed; }
+        else if (slot.kind == "M.2/NGFF 插槽") { ++ngffTotal; if (used) ++ngffUsed; }
+        else if (slot.kind == "SATA 插槽") { ++sataSlotTotal; if (used) ++sataSlotUsed; }
+        else if (slot.kind == "IDE 插槽") { ++ideSlotTotal; if (used) ++ideSlotUsed; }
+        else
+        {
+            ++genericSlotTotal;
+            if (used)
+            {
+                ++genericSlotUsed;
+                if (!genericUsedNames.empty()) genericUsedNames += "、";
+                genericUsedNames += slot.designation;
+            }
+        }
+    }
+
+    auto printDiskCategory = [&](const char* label, const std::vector<HwDisk>& items)
+    {
+        std::cout << "  " << label << ": 已接 " << items.size() << " 个\n";
+        for (const auto& disk : items)
+            std::cout << "    " << disk.model << "  " << disk.bytes / (1024ull * 1024 * 1024) << " GB\n";
+    };
+
+    std::cout << "存储接口占用:\n";
+    printDiskCategory("NVMe", nvmeDisks);
+    printDiskCategory("SATA", sataDisks);
+    printDiskCategory("IDE", ideDisks);
+    printDiskCategory("USB 外置", usbDisks);
+    if (!otherDisks.empty()) printDiskCategory("其他", otherDisks);
+    std::cout << "  CD-ROM 光驱: " << engine.cdroms.size() << " 个\n";
+    for (const auto& cdrom : engine.cdroms)
+        std::cout << "    " << (cdrom.model.empty() ? "光驱" : cdrom.model)
+                  << (cdrom.letter.empty() ? "" : "（" + cdrom.letter + "）") << "  " << cdrom.bus << "\n";
+
+    std::cout << "\n主板插槽（SMBIOS 报告，占用 / 总数）:\n";
+    std::cout << "  NGFF/M.2 插槽: " << ngffUsed << " / " << ngffTotal << "\n";
+    std::cout << "  mSATA 插槽: " << msataUsed << " / " << msataTotal << "\n";
+    std::cout << "  SATA 插槽: " << sataSlotUsed << " / " << sataSlotTotal << "\n";
+    std::cout << "  IDE 插槽: " << ideSlotUsed << " / " << ideSlotTotal << "\n";
+    if (genericSlotTotal > 0)
+    {
+        std::cout << "  其他系统插槽（PCIe 等）: " << genericSlotUsed << " / " << genericSlotTotal << "\n";
+        if (!genericUsedNames.empty()) std::cout << "    已占用: " << genericUsedNames << "\n";
+    }
+    if (engine.slots.empty()) std::cout << "  （本机 SMBIOS 未报告插槽信息）\n";
+    std::cout << "\n说明：主板物理接口总数以厂商规格书为准，SMBIOS 未报告的接口无法统计。\n";
+    Pause();
+}
+
+// 实时监测面板：CPU 负载、内存、ACPI 热区温度、GPU 温度（nvidia-smi）、硬盘 SMART 温度
+void HardwareRealtimePanel()
+{
+    ClearScreen();
+    HwEngine& engine = GetHardwareEngine();
+    if (!engine.ready) InitHardwareEngine();
+
+    // 原生 ACPI 热区不可用时才连 WMI 兜底
+    bool useWmiZones = engine.thermalZones.empty();
+    WmiSession thermalSession{};
+    if (useWmiZones)
+    {
+        EnsureComInitialized();
+        useWmiZones = WmiConnect(thermalSession, L"ROOT\\WMI");
+    }
+
+    wchar_t nvidiaPath[MAX_PATH] = L"";
+    bool hasNvidiaSmi = SearchPathW(nullptr, L"nvidia-smi.exe", nullptr, MAX_PATH, nvidiaPath, nullptr) != 0;
+
+    int interval = GetIntInput("刷新间隔（秒，1-10，直接回车=2）: ", 2);
+    if (interval <= 0) interval = 2;
+    if (interval > 10) interval = 10;
+
+    std::cout << "\n开始实时监测（每 " << interval << " 秒刷新），按 ESC 退出...\n";
+    Sleep(600);
+
+    FILETIME idlePrev{}, kernelPrev{}, userPrev{};
+    GetSystemTimes(&idlePrev, &kernelPrev, &userPrev);
+
+    bool running = true;
+    // 按键检测兼容三种输入：控制台 _kbhit/_getch、管道 PeekNamedPipe、普通重定向用 std::cin
+    auto readPanelKey = [&]() -> int
+    {
+        if (_kbhit()) return _getch();
+        HANDLE stdinHandle = GetStdHandle(STD_INPUT_HANDLE);
+        if (GetFileType(stdinHandle) == FILE_TYPE_PIPE)
+        {
+            DWORD available = 0;
+            if (!PeekNamedPipe(stdinHandle, nullptr, 0, nullptr, &available, nullptr))
+            {
+                running = false; // 管道已断开，退出监测
+                return -2;
+            }
+            if (available > 0)
+            {
+                char ch = 0;
+                DWORD read = 0;
+                if (ReadFile(stdinHandle, &ch, 1, &read, nullptr) && read == 1)
+                    return static_cast<unsigned char>(ch);
+                running = false;
+                return -2;
+            }
+            return -1;
+        }
+        if (std::cin.rdbuf()->in_avail() > 0)
+        {
+            int ch = std::cin.get();
+            if (ch == EOF) running = false;
+            return ch;
+        }
+        return -1;
+    };
+    while (running)
+    {
+        DWORD waitedMs = 0;
+        while (waitedMs < static_cast<DWORD>(interval * 1000) && running)
+        {
+            int key = readPanelKey();
+            if (key == 27) running = false;
+            if (running) { Sleep(50); waitedMs += 50; }
+        }
+        if (!running) break;
+
+        // CPU 负载：GetSystemTimes 两次采样差值
+        FILETIME idleNow{}, kernelNow{}, userNow{};
+        double cpuPercent = -1.0;
+        if (GetSystemTimes(&idleNow, &kernelNow, &userNow))
+        {
+            ULARGE_INTEGER idle0, idle1, ker0, ker1, usr0, usr1;
+            idle0.LowPart = idlePrev.dwLowDateTime; idle0.HighPart = idlePrev.dwHighDateTime;
+            idle1.LowPart = idleNow.dwLowDateTime; idle1.HighPart = idleNow.dwHighDateTime;
+            ker0.LowPart = kernelPrev.dwLowDateTime; ker0.HighPart = kernelPrev.dwHighDateTime;
+            ker1.LowPart = kernelNow.dwLowDateTime; ker1.HighPart = kernelNow.dwHighDateTime;
+            usr0.LowPart = userPrev.dwLowDateTime; usr0.HighPart = userPrev.dwHighDateTime;
+            usr1.LowPart = userNow.dwLowDateTime; usr1.HighPart = userNow.dwHighDateTime;
+            ULONGLONG busyDelta = (ker1.QuadPart - ker0.QuadPart) + (usr1.QuadPart - usr0.QuadPart);
+            ULONGLONG idleDelta = idle1.QuadPart - idle0.QuadPart;
+            if (busyDelta > idleDelta) cpuPercent = 100.0 * (1.0 - static_cast<double>(idleDelta) / busyDelta);
+            idlePrev = idleNow; kernelPrev = kernelNow; userPrev = userNow;
+        }
+
+        // 内存占用
+        MEMORYSTATUSEX mem{};
+        mem.dwLength = sizeof(mem);
+        GlobalMemoryStatusEx(&mem);
+
+        // ACPI 热区温度（自研引擎优先，WMI 兜底）
+        struct ZoneReading { std::string name; double celsius; bool valid; };
+        std::vector<ZoneReading> zones;
+        if (!engine.thermalZones.empty())
+        {
+            for (const auto& zone : engine.thermalZones)
+            {
+                ZoneReading reading;
+                reading.name = zone.name;
+                reading.valid = ReadEngineThermalZone(zone, reading.celsius);
+                zones.push_back(reading);
+            }
+        }
+        else if (useWmiZones)
+        {
+            std::vector<ThermalZoneInfo> wmiZones;
+            WmiForEach(thermalSession, L"SELECT InstanceName, CurrentTemperature FROM MSAcpi_ThermalZoneTemperature",
+                &CollectThermalZone, &wmiZones);
+            for (const auto& zone : wmiZones)
+                zones.push_back({zone.name, zone.celsius, zone.valid});
+        }
+
+        // 磁盘温度（自研引擎：NVMe 协议命令 / SMART 属性 194/190）
+        std::vector<double> diskTempValues(engine.disks.size(), 0.0);
+        std::vector<bool> diskTempValid(engine.disks.size(), false);
+        for (size_t i = 0; i < engine.disks.size(); ++i)
+            diskTempValid[i] = ReadEngineDiskTemperature(engine.disks[i], diskTempValues[i]);
+
+        // GPU 温度（NvAPI 引擎优先，nvidia-smi 兜底）
+        std::vector<std::string> gpuLines;
+        if (engine.nvapiReady)
+        {
+            NvApiFunctions& nv = GetNvApiFuncs();
+#pragma pack(push, 1)
+            struct NvThermalSettings
+            {
+                unsigned long version, count;
+                struct { unsigned long controller, target, currentTemp, defaultTemp, maxTemp, minimumTemp, flags; } sensor[4];
+            };
+#pragma pack(pop)
+            for (const auto& gpu : engine.gpus)
+            {
+                NvThermalSettings settings{};
+                settings.version = (sizeof(NvThermalSettings) << 16) | 1;
+                double celsius = -1;
+                if (nv.getThermalSettings && nv.getThermalSettings(gpu.handle, 1, &settings) == 0 && settings.count > 0)
+                    celsius = settings.sensor[0].currentTemp;
+                std::ostringstream line;
+                line << "  GPU " << (gpu.name.empty() ? "NVIDIA" : gpu.name) << ": ";
+                if (celsius >= 0) line << std::fixed << std::setprecision(0) << celsius << "°C";
+                else line << "读取失败";
+                gpuLines.push_back(line.str());
+            }
+        }
+        else if (hasNvidiaSmi)
+        {
+            FILE* pipe = _popen("nvidia-smi --query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits", "r");
+            if (pipe)
+            {
+                char lineBuf[512];
+                while (fgets(lineBuf, sizeof(lineBuf), pipe))
+                {
+                    std::string line(lineBuf);
+                    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+                    if (line.empty()) continue;
+                    // 从右侧解析 4 个数值字段，剩余部分为显卡名称（可能含逗号）
+                    std::string name = line, nums[4];
+                    bool ok = true;
+                    for (int f = 3; f >= 0 && ok; --f)
+                    {
+                        size_t comma = name.rfind(',');
+                        if (comma == std::string::npos) { ok = false; break; }
+                        nums[f] = name.substr(comma + 1);
+                        name = name.substr(0, comma);
+                    }
+                    if (!ok) continue;
+                    size_t first = name.find_first_not_of(" \"");
+                    size_t last = name.find_last_not_of(" \"");
+                    if (first == std::string::npos) continue;
+                    name = name.substr(first, last - first + 1);
+                    gpuLines.push_back("  GPU " + name + ": " + nums[0] + "°C  负载 " + nums[1]
+                        + "%  显存 " + nums[2] + "/" + nums[3] + " MB");
+                }
+                _pclose(pipe);
+            }
+        }
+
+        // 渲染（curl 式：每轮清屏重绘）
+        ClearScreen();
+        std::cout << "========== 硬件实时监测（每 " << interval << " 秒刷新，按 ESC 退出） ==========\n\n";
+
+        char timeBuf[16];
+        {
+            std::time_t now = std::time(nullptr);
+            std::tm localNow{};
+            localtime_s(&localNow, &now);
+            std::strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", &localNow);
+        }
+        std::ostringstream usage;
+        usage << "时间: " << timeBuf << "    CPU 负载: ";
+        if (cpuPercent >= 0) usage << std::fixed << std::setprecision(0) << cpuPercent << "%";
+        else usage << "N/A";
+        usage << "    内存: " << std::setprecision(1) << (mem.ullTotalPhys - mem.ullAvailPhys) / (1024.0 * 1024 * 1024)
+              << " / " << mem.ullTotalPhys / (1024.0 * 1024 * 1024)
+              << " GB（" << mem.dwMemoryLoad << "%）";
+        std::cout << usage.str() << "\n";
+        std::cout << "温度监控:\n";
+
+        if (!zones.empty())
+            for (const auto& zone : zones)
+            {
+                std::cout << "  热区 " << zone.name << ": ";
+                if (zone.valid) std::cout << std::fixed << std::setprecision(1) << zone.celsius << "°C\n";
+                else std::cout << "读取失败\n";
+            }
+        else
+            std::cout << "  热区: （本机 ACPI 未提供温度，CPU/主板温度请在 BIOS 或厂商工具中查看）\n";
+
+        if (!gpuLines.empty())
+            for (const auto& lineText : gpuLines) std::cout << lineText << "\n";
+        else if (hasNvidiaSmi)
+            std::cout << "  GPU: nvidia-smi 未返回数据\n";
+        else
+            std::cout << "  GPU: 未检测到 nvidia-smi（NVIDIA 显卡装好驱动后可用），其他品牌无通用温度接口\n";
+
+        if (!engine.disks.empty())
+        {
+            for (size_t i = 0; i < engine.disks.size(); ++i)
+            {
+                const auto& disk = engine.disks[i];
+                std::cout << "  硬盘" << i + 1 << " " << disk.model << " (" << disk.bus << "): ";
+                if (diskTempValid[i])
+                    std::cout << std::fixed << std::setprecision(1) << diskTempValues[i] << "°C\n";
+                else
+                    std::cout << "传感器不可用\n";
+            }
+        }
+        else
+            std::cout << "  硬盘: （未枚举到物理磁盘）\n";
+    }
+
+    if (useWmiZones) WmiClose(thermalSession);
+    std::cout << "\n已退出实时监测。" << std::endl;
+    Pause();
+}
+
+// 硬件实时监测菜单
+void HardwareMonitorMenu()
+{
+    while (true)
+    {
+        ClearScreen();
+        std::cout << "========== 硬件实时监测 ==========\n";
+        std::cout << " 1. 实时监测面板（CPU/内存/温度，ESC 退出）\n";
+        std::cout << " 2. 内存插槽信息（占用/总数/模块详情）\n";
+        std::cout << " 3. 硬盘与存储插槽（IDE/SATA/mSATA/CD-ROM/NVMe/NGFF）\n";
+        std::cout << " 4. RAM 基准测试（读取/写入/复制）\n";
+        std::cout << " 0. 返回主菜单\n";
+        std::cout << "==================================\n";
+        int choice = GetIntInput("请选择: ");
+        if (choice == 0) break;
+        else if (choice == 1) HardwareRealtimePanel();
+        else if (choice == 2) MemorySlotInfo();
+        else if (choice == 3) DiskSlotInfo();
+        else if (choice == 4) MemoryBandwidthMenu();
         else { std::cout << "无效选项。" << std::endl; Pause(); }
     }
 }

@@ -1,6 +1,17 @@
 # 更新日志
 
+## npm 1.10.7 — 2026-11-15
+
+### 硬件实时监测（主菜单 39，自研引擎）
+
+- 实时监测面板：curl 式清屏重绘，刷新间隔 1-10 秒可调，ESC 退出；CPU 负载（GetSystemTimes 差值）、内存占用、ACPI 热区温度（原生 IOCTL 热区接口，不可用时回退 WMI）、NVIDIA 显卡温度（NvAPI 动态加载 nvapi64.dll）、硬盘温度（NVMe 直读 SMART/Health 日志、SATA 读 SMART 属性 194/190）。
+- 内存插槽信息：SMBIOS 直读占用/总数与主板最大容量（GetSystemFirmwareTable 不可用如 Win11 部分机型回退 WMI），逐条列出插槽位置/容量/频率/厂商/型号，空插槽单独标注。
+- 硬盘与存储插槽：CreateFile + IOCTL 枚举物理磁盘与光驱（StorageDeviceDescriptor 总线类型），按 IDE/SATA/USB/NVMe 分类；CD-ROM 显示盘符；SMBIOS Type 9 插槽按 NGFF/M.2、mSATA、SATA、IDE 归类并统计占用/总数，未报告类型显示 0/0。
+- RAM 基准测试：多线程读取/写入/复制带宽（GB/s），3 轮取最佳。
+- 构建新增 setupapi 链接；CMake 与 MinGW 命令同步。
+
 ## npm 1.10.6 — 2026-11-15
+
 
 ### Windows 更新管理修复（主菜单 2）
 
