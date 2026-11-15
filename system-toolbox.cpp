@@ -804,6 +804,7 @@ void SoftwareUpdate();
 bool GetLatestReleaseInfo(std::string& tagName, std::string& downloadUrl, std::string& body, std::string* manifestUrl = nullptr);
 std::wstring QuoteProcessArgument(const std::wstring& argument);
 bool DownloadWithFastdl(const std::string& url, const std::string& destination, bool background = false);
+bool DownloadWithCurlInsecure(const std::string& url, const std::string& destination);
 bool InstallLegacyQQMusic();
 void FastdlMenu();
 void DisktoolDlcMenu();
@@ -10784,6 +10785,29 @@ bool DownloadWithFastdl(const std::string& url, const std::string& destination, 
     return RunProcessArguments(arguments, background);
 }
 
+// 使用 CURL 拉取并强制跳过 SSL/TLS 证书校验（--insecure --ssl-no-revoke）。
+// 用于证书链不完整的镜像/站点；内容完整性仍由调用方的 SHA256/签名校验保证。
+bool DownloadWithCurlInsecure(const std::string& url, const std::string& destination)
+{
+    if (url.rfind("https://", 0) != 0 && url.rfind("http://", 0) != 0)
+    {
+        std::cout << "不支持的下载协议。\n";
+        return false;
+    }
+    if (destination.empty()) return false;
+    auto staged = std::filesystem::u8path(destination + ".curl-part");
+    std::cout << "正在使用 CURL 下载（强制跳过 SSL/TLS 证书校验）...\n";
+    bool ok = RunProcessArguments({L"curl.exe", L"--fail", L"--insecure", L"--ssl-no-revoke", L"--location",
+        L"--retry", L"2", L"--connect-timeout", L"20", L"--output", staged.wstring(), L"--url", Utf8Command(url)});
+    if (!ok)
+    {
+        std::error_code cleanup;
+        std::filesystem::remove(staged, cleanup);
+        return false;
+    }
+    return MoveFileExW(staged.c_str(), std::filesystem::u8path(destination).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+}
+
 bool InstallLegacyQQMusic()
 {
     if (!g_bOnlineMode) { std::cout << "当前为离线模式。\n"; return false; }
@@ -10794,8 +10818,8 @@ bool InstallLegacyQQMusic()
     auto installer = directory / L"QQMusic_Setup_1951.exe";
     const std::string hash = "86841D77C59FE4752C2A799F57B74FAF25B07390612767DDC0B071A8CDB49F74";
     if (GetFileSHA256(PathToUtf8(installer)) != hash &&
-        !DownloadWithFastdl("https://q23213ddssd.dpdns.org/downloads/QQMusic_Setup_1951.exe", PathToUtf8(installer)) &&
-        !DownloadWithFastdl("https://web.archive.org/web/20240109id_/https://dldir1v6.qq.com/music/clntupate/QQMusic_Setup_1951.exe", PathToUtf8(installer)))
+        !DownloadWithCurlInsecure("https://q23213ddssd.dpdns.org/downloads/QQMusic_Setup_1951.exe", PathToUtf8(installer)) &&
+        !DownloadWithCurlInsecure("https://web.archive.org/web/20240109id_/https://dldir1v6.qq.com/music/clntupate/QQMusic_Setup_1951.exe", PathToUtf8(installer)))
         return false;
     if (GetFileSHA256(PathToUtf8(installer)) != hash) { std::cout << "安装包校验失败，未启动。\n"; return false; }
     std::cout << "将启动 QQ音乐 19.51 安装向导，可能影响当前安装版本。\n";
@@ -10898,8 +10922,8 @@ bool InstallPsExecToCurrentDirectory()
         if (!length || length >= MAX_PATH || !GetTempFileNameW(tempDir, L"pse", 0, tempFile))
         { std::cout << "无法创建临时下载文件。\n"; return false; }
         std::filesystem::path staged(tempFile);
-        std::cout << "正在从微软 Sysinternals 下载 PsExec64 并检查签名...\n";
-        bool downloaded = DownloadWithFastdl("https://live.sysinternals.com/PsExec64.exe", PathToUtf8(staged));
+        std::cout << "正在从微软 Sysinternals 下载 PsExec64（CURL，跳过 SSL 校验）并检查签名...\n";
+        bool downloaded = DownloadWithCurlInsecure("https://live.sysinternals.com/PsExec64.exe", PathToUtf8(staged));
         bool trusted = downloaded && IsTrustedMicrosoftExecutable(staged);
         bool installed = trusted && MoveFileExW(staged.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH);
         std::filesystem::remove(staged, error);
@@ -14720,8 +14744,8 @@ void DisktoolDlcMenu()
         {
             if (!g_bOnlineMode) { std::cout << "当前为离线模式。\n"; continue; }
             auto download = directory / L"disktool-download.exe";
-            if (!DownloadWithFastdl("https://github.com/huvubb/disktool/releases/download/v1.0.0/disktool.exe", PathToUtf8(download)) &&
-                !DownloadWithFastdl("https://q23213ddssd.dpdns.org/downloads/disktool.exe", PathToUtf8(download)))
+            if (!DownloadWithCurlInsecure("https://github.com/huvubb/disktool/releases/download/v1.0.0/disktool.exe", PathToUtf8(download)) &&
+                !DownloadWithCurlInsecure("https://q23213ddssd.dpdns.org/downloads/disktool.exe", PathToUtf8(download)))
                 std::cout << "下载未完成，已保留原 DLC。\n";
             else if (!InstallDisktoolFile(download, program))
                 std::cout << "DLC 校验或安装失败，已保留原 DLC。\n";

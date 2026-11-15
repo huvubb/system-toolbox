@@ -1,6 +1,16 @@
 # 更新日志
 
+## npm 1.10.9 — 2026-11-15
+
+### 依赖项下载改用 CURL 并跳过 SSL/TLS 校验
+
+- TrustedInstaller 依赖（PsExec64，live.sysinternals.com）、QQ音乐转码器安装包（主镜像与 web.archive.org 备源）、DiskTool DLC（GitHub Release 与国内镜像）改为 CURL 拉取，强制 `--insecure --ssl-no-revoke` 跳过 SSL/TLS 证书校验与吊销检查，规避镜像站点证书链不完整导致的下载失败。
+- 内容完整性不受影响：QQ音乐安装包仍做 SHA256 校验，PsExec64 仍做微软签名校验，DiskTool DLC 仍核验记录的构建哈希。
+- 工具箱自更新下载不受影响（保持 FastDL/curl 常规校验与哈希清单）。
+- FFmpeg 等经 winget 安装的软件不适用 CURL 参数，行为不变。
+
 ## npm 1.10.8 — 2026-11-15
+
 
 ### CPU/显卡/风扇监测扩展（主菜单 39 → 5，自研引擎）
 
