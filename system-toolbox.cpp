@@ -9432,8 +9432,7 @@ void DirectX12Test()
     std::cout << "使用 D3D12 命令队列 + FLIP 交换链进行渲染压测。\n";
     int durationSeconds = SelectDuration(true);
     if (durationSeconds == 0) { std::cout << "操作已取消。" << std::endl; Pause(); return; }
-    std::cout << "\n按任意键开始 DirectX 12 测试...\n" << std::flush;
-    _getch();
+    std::cout << "\n即将开始 DirectX 12 测试（时长 " << (durationSeconds == -1 ? "不限，ESC 结束" : std::to_string(durationSeconds) + " 秒") << "）...\n" << std::flush;
 
     std::cout << "正在创建 D3D12 设备与交换链（首次初始化驱动约需 1-3 秒）...\n" << std::flush;
     WNDCLASSW wc = {0};
