@@ -47,7 +47,9 @@ bool g_bModeInitialized = false;
 #include <filesystem>
 #include <limits>
 #include <d3d11.h> // 添加
+#include <d3d12.h> // DirectX 12 测试
 #include <dxgi.h>  // 添加
+#include <dxgi1_4.h> // DXGI 1.4（IDXGIFactory4 / IDXGISwapChain3）
 #include <shellapi.h>
 #include <ws2ipdef.h> // 必须在 iphlpapi.h 之前：MinGW 的 netioapi.h 内容包在 _WS2IPDEF_ 守卫里
 #include <iphlpapi.h> // 网卡吞吐量（GetIfTable2）
@@ -75,6 +77,7 @@ bool g_bModeInitialized = false;
 #pragma comment(lib, "oleaut32.lib") // BSTR
 #pragma comment(lib, "setupapi.lib") // 设备枚举
 #pragma comment(lib, "iphlpapi.lib") // 网络接口统计
+#pragma comment(lib, "d3d12.lib") // DirectX 12 测试
 
 // ====================================================================
 // 基础工具函数
@@ -888,6 +891,7 @@ void InitHardwareEngine();
 void GetGpuInfo();
 void OpenGLTest();
 void DirectX11Test();
+void DirectX12Test();
 void GpuAiComputeTest();
 void VulkanTest();
 void GpuMultiWindowTest();
@@ -9420,6 +9424,191 @@ void GpuAiComputeTest()
     Pause();
 }
 
+// DirectX 12 测试（FLIP 交换链清屏渲染压测，Win10 1607+）
+void DirectX12Test()
+{
+    ClearScreen();
+    std::cout << "========== DirectX 12 测试 ==========\n";
+    std::cout << "使用 D3D12 命令队列 + FLIP 交换链进行渲染压测。\n";
+    int durationSeconds = SelectDuration(true);
+    if (durationSeconds == 0) { std::cout << "操作已取消。" << std::endl; Pause(); return; }
+    std::cout << "\n按任意键开始 DirectX 12 测试...\n" << std::flush;
+    _getch();
+
+    std::cout << "正在创建 D3D12 设备与交换链（首次初始化驱动约需 1-3 秒）...\n" << std::flush;
+    WNDCLASSW wc = {0};
+    wc.lpfnWndProc = GPUStressWndProc;
+    wc.hInstance = GetModuleHandle(NULL);
+    wc.lpszClassName = L"D3D12TestWindow";
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    RegisterClassW(&wc);
+    HWND hwnd = CreateWindowW(L"D3D12TestWindow", L"DirectX 12 GPU Test", WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1280, 800, NULL, NULL, wc.hInstance, NULL);
+    if (!hwnd) { std::cout << "窗口创建失败！" << std::endl; Pause(); return; }
+    RECT clientRect{};
+    GetClientRect(hwnd, &clientRect);
+    UINT width = clientRect.right > 0 ? static_cast<UINT>(clientRect.right) : 1280;
+    UINT height = clientRect.bottom > 0 ? static_cast<UINT>(clientRect.bottom) : 800;
+    ShowWindow(hwnd, SW_SHOW);
+
+    IDXGIFactory4* factory = nullptr;
+    ID3D12Device* device = nullptr;
+    ID3D12CommandQueue* queue = nullptr;
+    IDXGISwapChain3* swapChain = nullptr;
+    ID3D12DescriptorHeap* rtvHeap = nullptr;
+    ID3D12Resource* renderTargets[2] = {};
+    ID3D12CommandAllocator* allocators[2] = {};
+    ID3D12GraphicsCommandList* commandList = nullptr;
+    ID3D12Fence* fence = nullptr;
+    HANDLE fenceEvent = nullptr;
+    UINT frameIndex = 0, rtvIncrement = 0;
+    UINT64 fenceValue = 0;
+    bool initialized = false;
+    D3D_FEATURE_LEVEL maxLevel = D3D_FEATURE_LEVEL_11_0;
+    HRESULT hr;
+
+    auto cleanupD3D12 = [&]() {
+        if (fenceEvent) CloseHandle(fenceEvent);
+        if (fence) fence->Release();
+        for (auto& target : renderTargets) if (target) target->Release();
+        if (rtvHeap) rtvHeap->Release();
+        if (commandList) commandList->Release();
+        for (auto& allocator : allocators) if (allocator) allocator->Release();
+        if (queue) queue->Release();
+        if (swapChain) swapChain->Release();
+        if (device) device->Release();
+        if (factory) factory->Release();
+        DestroyWindow(hwnd);
+    };
+    auto fail = [&](const std::string& message) {
+        std::cout << message << "（HRESULT: 0x" << std::hex << hr << std::dec << "）\n";
+        cleanupD3D12();
+        Pause();
+    };
+
+    if (FAILED(hr = CreateDXGIFactory1(__uuidof(IDXGIFactory4), (void**)&factory)))
+    { fail("创建 DXGI 工厂失败"); return; }
+    if (FAILED(hr = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device), (void**)&device)))
+    { fail("创建 D3D12 设备失败（显卡或驱动不支持 DirectX 12）"); return; }
+
+    D3D12_FEATURE_DATA_FEATURE_LEVELS featureLevels{};
+    D3D_FEATURE_LEVEL requestedLevels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_12_0, D3D_FEATURE_LEVEL_12_1 };
+    featureLevels.NumFeatureLevels = 4;
+    featureLevels.pFeatureLevelsRequested = requestedLevels;
+    if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS, &featureLevels, sizeof(featureLevels))))
+        maxLevel = featureLevels.MaxSupportedFeatureLevel;
+
+    D3D12_COMMAND_QUEUE_DESC queueDesc = {};
+    queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    if (FAILED(hr = device->CreateCommandQueue(&queueDesc, __uuidof(ID3D12CommandQueue), (void**)&queue)))
+    { fail("创建命令队列失败"); return; }
+
+    DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
+    swapChainDesc.Width = width;
+    swapChainDesc.Height = height;
+    swapChainDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    swapChainDesc.SampleDesc.Count = 1;
+    swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    swapChainDesc.BufferCount = 2;
+    swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    if (FAILED(hr = factory->CreateSwapChainForHwnd(queue, hwnd, &swapChainDesc, nullptr, nullptr, reinterpret_cast<IDXGISwapChain1**>(&swapChain))))
+    { fail("创建交换链失败"); return; }
+    frameIndex = swapChain->GetCurrentBackBufferIndex();
+
+    D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+    heapDesc.NumDescriptors = 2;
+    heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    if (FAILED(hr = device->CreateDescriptorHeap(&heapDesc, __uuidof(ID3D12DescriptorHeap), (void**)&rtvHeap)))
+    { fail("创建描述符堆失败"); return; }
+    rtvIncrement = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandles[2];
+    rtvHandles[0] = rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    rtvHandles[1] = { rtvHandles[0].ptr + rtvIncrement };
+    for (UINT i = 0; i < 2; ++i)
+    {
+        if (FAILED(hr = swapChain->GetBuffer(i, __uuidof(ID3D12Resource), (void**)&renderTargets[i])))
+        { fail("获取交换链缓冲失败"); return; }
+        device->CreateRenderTargetView(renderTargets[i], nullptr, rtvHandles[i]);
+    }
+    if (FAILED(hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, __uuidof(ID3D12CommandAllocator), (void**)&allocators[0])) ||
+        FAILED(hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, __uuidof(ID3D12CommandAllocator), (void**)&allocators[1])))
+    { fail("创建命令分配器失败"); return; }
+    if (FAILED(hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocators[0], nullptr, __uuidof(ID3D12GraphicsCommandList), (void**)&commandList)))
+    { fail("创建命令列表失败"); return; }
+    commandList->Close(); // 初始为打开状态，先关闭
+    if (FAILED(hr = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), (void**)&fence)))
+    { fail("创建 fence 失败"); return; }
+    fenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    initialized = true;
+    std::cout << "设备特性等级: 0x" << std::hex << static_cast<unsigned>(maxLevel) << std::dec << "\n\n";
+    std::cout << "渲染中（" << width << "x" << height << "），ESC 结束...\n";
+
+    D3D12_VIEWPORT viewport = { 0, 0, static_cast<float>(width), static_cast<float>(height), 0, 1 };
+    D3D12_RECT scissor = { 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) };
+    auto start = std::chrono::steady_clock::now();
+    UINT frameCount = 0;
+    bool running = true;
+    while (running)
+    {
+        ID3D12CommandAllocator* allocator = allocators[frameIndex];
+        if (FAILED(allocator->Reset()) || FAILED(commandList->Reset(allocator, nullptr))) break;
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = renderTargets[frameIndex];
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        commandList->ResourceBarrier(1, &barrier);
+        commandList->RSSetViewports(1, &viewport);
+        commandList->RSSetScissorRects(1, &scissor);
+        commandList->OMSetRenderTargets(1, &rtvHandles[frameIndex], FALSE, nullptr);
+        double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        float color[4] = { 0.10f + 0.45f * static_cast<float>(0.5 + 0.5 * sin(seconds * 2.0)),
+                           0.10f + 0.45f * static_cast<float>(0.5 + 0.5 * sin(seconds * 2.0 + 2.1)),
+                           0.10f + 0.45f * static_cast<float>(0.5 + 0.5 * sin(seconds * 2.0 + 4.2)), 1.0f };
+        commandList->ClearRenderTargetView(rtvHandles[frameIndex], color, 0, nullptr);
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+        commandList->ResourceBarrier(1, &barrier);
+        commandList->Close();
+        ID3D12CommandList* lists[] = { commandList };
+        queue->ExecuteCommandLists(1, lists);
+        swapChain->Present(0, 0);
+        ++fenceValue;
+        queue->Signal(fence, fenceValue);
+        fence->SetEventOnCompletion(fenceValue, fenceEvent);
+        WaitForSingleObject(fenceEvent, 2000);
+        frameIndex = swapChain->GetCurrentBackBufferIndex();
+        ++frameCount;
+        if (frameCount % 30 == 0)
+        {
+            double sofar = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            if (sofar > 0)
+            {
+                wchar_t titleText[96];
+                swprintf(titleText, 96, L"DirectX 12 GPU Test - FPS: %.1f", frameCount / sofar);
+                SetWindowTextW(hwnd, titleText);
+            }
+        }
+        if (durationSeconds > 0 && seconds >= durationSeconds) running = false;
+        if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) running = false;
+        MSG msg;
+        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
+        {
+            if (msg.message == WM_QUIT) running = false;
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+    }
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    std::cout << "\n=== DirectX 12 测试结果 ===\n";
+    std::cout << "持续时间: " << std::fixed << std::setprecision(1) << elapsed << " 秒\n";
+    std::cout << "帧数: " << frameCount << "\n";
+    if (elapsed > 0) std::cout << "FPS: " << std::fixed << std::setprecision(2) << frameCount / elapsed << "\n";
+    cleanupD3D12();
+    Pause();
+}
+
 // 选择测试时长
 int SelectDuration(bool allowInfinite)
 {
@@ -9699,17 +9888,19 @@ void GpuToolsMenu()
         std::cout << " 3. DirectX 11 测试\n";
         std::cout << " 4. Vulkan 测试\n";
         std::cout << " 5. 多窗口压测（2-8窗口）\n";
+        std::cout << " 6. DirectX 12 测试（FLIP 清屏渲染压测）\n";
         std::cout << " 0. 返回主菜单\n";
         std::cout << "=========================================\n";
-        
+
         int choice = GetIntInput("请选择: ");
-        
+
         if (choice == 0) break;
         else if (choice == 1) GetGpuInfo();
         else if (choice == 2) OpenGLTest();
         else if (choice == 3) DirectX11Test();
         else if (choice == 4) VulkanTest();
         else if (choice == 5) GpuMultiWindowTest();
+        else if (choice == 6) DirectX12Test();
         else { std::cout << "无效选项。" << std::endl; Pause(); }
     }
 }
@@ -10097,6 +10288,107 @@ void HardwareOverview()
     Pause();
 }
 
+// 注入驱动到离线系统目录（DISM /Add-Driver，适用于部署的系统、挂载的 WIM、WinPE）
+std::string UnquotePath(std::string path);
+void InjectDriversOffline()
+{
+    ClearScreen();
+    std::cout << "========== 注入驱动到离线系统目录 ==========\n";
+    std::cout << "适用于：部署在硬盘上的 Windows 目录、挂载的 install.wim/boot.wim、WinPE 目录。\n\n";
+    std::string imageDir = UnquotePath(GetInput("离线系统目录（包含 Windows 子目录，如 D:\\Mount\\Windows）: "));
+    std::string driverDir = UnquotePath(GetInput("驱动文件夹（含 INF，将递归注入全部）: "));
+    if (imageDir.empty() || driverDir.empty()) { std::cout << "路径不能为空！\n"; Pause(); return; }
+    DWORD imageAttr = GetFileAttributesA(imageDir.c_str());
+    if (imageAttr == INVALID_FILE_ATTRIBUTES || !(imageAttr & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        std::cout << "离线目录不存在: " << imageDir << "\n";
+        Pause();
+        return;
+    }
+    std::error_code error;
+    if (!std::filesystem::exists(std::filesystem::u8path(imageDir) / L"Windows", error))
+        std::cout << "提示：目录下未找到 Windows 子目录，DISM 可能会拒绝该映像路径。\n";
+    std::cout << "是否强制注入未签名驱动？(y/n): ";
+    char force = 'n';
+    std::cin >> force;
+    std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+    std::string cmd = "dism /Image:\"" + imageDir + "\" /Add-Driver /Driver:\"" + driverDir + "\" /Recurse";
+    if (force == 'y' || force == 'Y') cmd += " /ForceUnsigned";
+    RunCmd(cmd);
+    std::cout << "\n查看已注入驱动：dism /Image:\"" << imageDir << "\" /Get-Drivers\n";
+    Pause();
+}
+
+// 一键通过 Windows Update 下载并安装缺失驱动（微软官方按硬件 ID 自动匹配）
+void AutoInstallMissingDrivers()
+{
+    ClearScreen();
+    std::cout << "========== 一键更新缺失驱动（Windows Update） ==========\n";
+    std::cout << "使用微软官方 Windows Update 按设备硬件 ID 自动匹配、下载并安装缺失驱动。\n";
+    std::cout << "搜索可能需要 1-3 分钟，请耐心等待。\n\n";
+    if (QueryServiceStartType(L"wuauserv") == SERVICE_DISABLED)
+    {
+        std::cout << "检测到 Windows Update 服务被禁用（可能在主菜单 2 禁用过更新）。\n";
+        std::cout << "是否恢复为手动启动并继续？(y/n): ";
+        char confirm;
+        std::cin >> confirm;
+        std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+        if (confirm != 'y' && confirm != 'Y') { Pause(); return; }
+        RunCmd("sc config wuauserv start= demand", true, true);
+        if (QueryServiceRunState(L"wuauserv") != SERVICE_RUNNING)
+            RunCmd("sc start wuauserv", true, true);
+    }
+    std::cout << "是否开始搜索并安装？(y/n): ";
+    char confirm;
+    std::cin >> confirm;
+    std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+    if (confirm != 'y' && confirm != 'Y') { Pause(); return; }
+
+    char tempDir[MAX_PATH];
+    DWORD tempLen = GetTempPathA(MAX_PATH, tempDir);
+    if (!tempLen || tempLen >= MAX_PATH) { std::cout << "无法获取临时目录。\n"; Pause(); return; }
+    std::string scriptPath = std::string(tempDir) + "stb_wudrivers.ps1";
+    std::ofstream script(std::filesystem::u8path(scriptPath), std::ios::binary);
+    if (!script.is_open()) { std::cout << "无法创建临时脚本。\n"; Pause(); return; }
+    script << "\xEF\xBB\xBF";
+    script << "$ErrorActionPreference = 'Stop'\n";
+    script << "try {\n";
+    script << "    Write-Host '正在连接 Windows Update 并按硬件 ID 搜索匹配驱动（可能需要 1-3 分钟）...'\n";
+    script << "    $session = New-Object -ComObject Microsoft.Update.Session\n";
+    script << "    $searcher = $session.CreateUpdateSearcher()\n";
+    script << "    $result = $searcher.Search(\"IsInstalled=0 and Type='Driver'\")\n";
+    script << "    Write-Host ('找到 ' + $result.Updates.Count + ' 个适用于本机的驱动更新')\n";
+    script << "    if ($result.Updates.Count -gt 0) {\n";
+    script << "        for ($i = 0; $i -lt $result.Updates.Count; $i++) { Write-Host ('  [' + ($i + 1) + '] ' + $result.Updates.Item($i).Title) }\n";
+    script << "        $downloader = $session.CreateUpdateDownloader()\n";
+    script << "        $downloader.Updates = $result.Updates\n";
+    script << "        Write-Host '正在下载...'\n";
+    script << "        $downloader.Download() | Out-Null\n";
+    script << "        Write-Host '正在安装...'\n";
+    script << "        $installer = $session.CreateUpdateInstaller()\n";
+    script << "        $installer.Updates = $result.Updates\n";
+    script << "        $installResult = $installer.Install()\n";
+    script << "        $codes = @{2 = '成功'; 3 = '成功但有错误'; 4 = '失败'; 5 = '已取消'}\n";
+    script << "        for ($i = 0; $i -lt $result.Updates.Count; $i++) {\n";
+    script << "            $r = $installResult.GetUpdateResult($i)\n";
+    script << "            Write-Host ('  ' + $result.Updates.Item($i).Title + ' -> ' + $codes[[int]$r.ResultCode])\n";
+    script << "        }\n";
+    script << "        Write-Host '安装流程完成。部分驱动需要重启电脑后生效。'\n";
+    script << "    } else {\n";
+    script << "        Write-Host '所有设备的驱动都已是最新，无需更新。'\n";
+    script << "    }\n";
+    script << "} catch {\n";
+    script << "    Write-Host ('失败: ' + $_.Exception.Message)\n";
+    script << "    Write-Host '提示：需要联网、Windows Update 服务可用，并以管理员身份运行。'\n";
+    script << "}\n";
+    script.close();
+    RunPowerShellFile(scriptPath, {}, false);
+    std::error_code removeError;
+    std::filesystem::remove(std::filesystem::u8path(scriptPath), removeError);
+    RunCmd("pnputil /scan-devices", true, true);
+    Pause();
+}
+
 void DriverToolsMenu()
 {
     while (true)
@@ -10130,6 +10422,8 @@ void DriverToolsMenu()
         std::cout << "19. 检查驱动冲突（异常设备）\n";
         std::cout << "20. 强制安装驱动（指定 INF 文件）\n";
         std::cout << "21. 导出驱动列表到文件\n";
+        std::cout << "22. 注入驱动到离线系统目录（DISM）\n";
+        std::cout << "23. 一键更新缺失驱动（Windows Update 自动匹配）\n";
         std::cout << "\n 0. 返回主菜单\n";
         std::cout << "==============================\n";
 
@@ -10288,6 +10582,12 @@ void DriverToolsMenu()
                 Pause();
                 break;
             }
+            case 22:
+                InjectDriversOffline();
+                break;
+            case 23:
+                AutoInstallMissingDrivers();
+                break;
             default:
                 std::cout << "无效选项。" << std::endl;
                 Pause();
@@ -15504,6 +15804,205 @@ int RunRepairOperation(const std::vector<std::wstring>& args)
     return static_cast<int>(result);
 }
 
+// ==================== DLL 修复库（DirectX_Repair 数据包，7z 解压修复） ====================
+
+// 读取 PE 头判断 DLL 位数：64 / 32 / 0（未知）
+int PeMachineBits(const std::wstring& path)
+{
+    std::ifstream file(std::filesystem::path(path), std::ios::binary);
+    if (!file) return 0;
+    char mz[2] = {};
+    file.read(mz, 2);
+    if (mz[0] != 'M' || mz[1] != 'Z') return 0;
+    file.seekg(0x3C);
+    DWORD peOffset = 0;
+    file.read(reinterpret_cast<char*>(&peOffset), sizeof(peOffset));
+    if (!peOffset || peOffset > 0x1000) return 0;
+    file.seekg(peOffset);
+    char pe[4] = {};
+    file.read(pe, 4);
+    if (memcmp(pe, "PE\0\0", 4) != 0) return 0;
+    WORD machine = 0;
+    file.read(reinterpret_cast<char*>(&machine), sizeof(machine));
+    if (machine == 0x8664) return 64;
+    if (machine == 0x014C) return 32;
+    return 0;
+}
+
+// 定位 7z.exe（PATH → Program Files → EXE 目录）
+std::string FindSevenZip()
+{
+    wchar_t found[MAX_PATH] = L"";
+    if (SearchPathW(nullptr, L"7z.exe", nullptr, MAX_PATH, found, nullptr))
+        return WideToUtf8Text(found);
+    const wchar_t* candidates[] = {
+        L"C:\\Program Files\\7-Zip\\7z.exe",
+        L"C:\\Program Files (x86)\\7-Zip\\7z.exe"
+    };
+    for (const wchar_t* candidate : candidates)
+    {
+        DWORD attr = GetFileAttributesW(candidate);
+        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY))
+            return WideToUtf8Text(candidate);
+    }
+    wchar_t exePath[32768] = L"";
+    GetModuleFileNameW(nullptr, exePath, 32768);
+    std::error_code error;
+    auto local = std::filesystem::path(exePath).parent_path() / L"7z.exe";
+    if (std::filesystem::is_regular_file(local, error)) return PathToUtf8(local);
+    return "";
+}
+
+// 递归查找文件名（不区分大小写，参数为 UTF-8 文件名）
+std::vector<std::wstring> FindFileInTree(const std::filesystem::path& root, const std::string& fileNameLower)
+{
+    std::vector<std::wstring> results;
+    std::error_code error;
+    for (std::filesystem::recursive_directory_iterator it(root, error), end; it != end && !error; it.increment(error))
+    {
+        if (error) break;
+        if (!it->is_regular_file()) continue;
+        if (ToLowerAscii(PathToUtf8(it->path().filename())) == fileNameLower) results.push_back(it->path().wstring());
+    }
+    return results;
+}
+
+// 把修复库里的 DLL 安装到系统目录（自动判断位数，已有文件先备份 .stb-bak）
+bool InstallRepairDll(const std::wstring& dllPath)
+{
+    int bits = PeMachineBits(dllPath);
+    if (bits == 0)
+    {
+        std::wcout << L"  跳过（无法识别位数）: " << dllPath << L"\n";
+        return false;
+    }
+    wchar_t windows[MAX_PATH] = L"";
+    if (!GetWindowsDirectoryW(windows, MAX_PATH)) return false;
+    std::filesystem::path target = std::filesystem::path(windows) / (bits == 64 ? L"System32" : L"SysWOW64") / std::filesystem::path(dllPath).filename();
+    std::error_code error;
+    if (std::filesystem::is_regular_file(target, error))
+    {
+        std::filesystem::path backup = target;
+        backup += L".stb-bak";
+        if (!std::filesystem::is_regular_file(backup, error))
+            std::filesystem::copy_file(target, backup, std::filesystem::copy_options::overwrite_existing, error);
+    }
+    std::filesystem::copy_file(dllPath, target, std::filesystem::copy_options::overwrite_existing, error);
+    if (error)
+    {
+        std::wcout << L"  复制失败（可能被占用）: " << target.wstring() << L"  错误 " << error.value() << L"\n";
+        return false;
+    }
+    std::wcout << L"  已安装: " << target.wstring() << L"（" << bits << L" 位）\n";
+    return true;
+}
+
+// DLL 修复库主流程：找包 → 解压 → 按名/全量修复
+void DllRepositoryRepair()
+{
+    ClearScreen();
+    std::cout << "========== DLL 修复库一键修复 ==========\n\n";
+
+    std::string archivePath;
+    wchar_t exePath[32768] = L"";
+    GetModuleFileNameW(nullptr, exePath, 32768);
+    std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
+    std::vector<std::filesystem::path> archiveCandidates = {
+        exeDir / L"DirectXRepair.7z",
+        GetToolboxDataDirectory() / L"drivers" / L"DirectXRepair.7z"
+    };
+    std::error_code error;
+    for (const auto& candidate : archiveCandidates)
+    {
+        if (std::filesystem::is_regular_file(candidate, error))
+        {
+            archivePath = PathToUtf8(candidate);
+            break;
+        }
+    }
+    if (archivePath.empty())
+    {
+        std::cout << "未找到修复库 DirectXRepair.7z（图吧工具箱 DirectX_Repair 的 Data 目录打包版，约 90 MB，100 个 DLL）。\n\n";
+        std::cout << "放置位置（任选其一）：\n";
+        std::cout << "  - 工具箱 EXE 同目录\n";
+        std::cout << "  - " << PathToUtf8(GetToolboxDataDirectory() / L"drivers") << "\n\n";
+        std::cout << "打包方法：把 DirectX_Repair\\Data 目录内的 A、B、C、L 文件夹压缩为 DirectXRepair.7z（仅 DLL）；\n";
+        std::cout << "也可到本工具箱发布页下载 DirectXRepair.7z 附件。\n";
+        Pause();
+        return;
+    }
+
+    std::string sevenZip = FindSevenZip();
+    if (sevenZip.empty())
+    {
+        std::cout << "未找到 7z.exe。请安装 7-Zip，或把 7z.exe 放到工具箱 EXE 同目录。\n";
+        Pause();
+        return;
+    }
+
+    auto outDir = GetToolboxDataDirectory() / L"dxrepair";
+    std::filesystem::create_directories(outDir, error);
+    std::cout << "修复库: " << archivePath << "\n";
+    std::cout << "正在解压到 " << PathToUtf8(outDir) << "（约 120 MB，需要几秒）...\n" << std::flush;
+    bool extracted = RunProcessArguments({
+        std::filesystem::u8path(sevenZip).wstring(), L"x",
+        std::filesystem::u8path(archivePath).wstring(),
+        L"-o" + outDir.wstring(), L"-y"});
+    if (!extracted)
+    {
+        std::cout << "解压失败，请确认 7z.exe 可用且压缩包完整。\n";
+        Pause();
+        return;
+    }
+    std::cout << "解压完成。\n\n";
+
+    while (true)
+    {
+        std::cout << "修复方式：\n"
+                  << " 1. 按文件名修复（输入缺失的 DLL 文件名）\n"
+                  << " 2. 全量修复（安装库内全部 DLL 到系统目录）\n"
+                  << " 0. 返回\n";
+        int choice = GetIntInput("请选择: ");
+        if (choice == 0 || !std::cin) return;
+        if (choice == 1)
+        {
+            std::string name = UnquotePath(GetInput("DLL 文件名（如 d3dx9_43.dll，输入 q 返回）: "));
+            if (name.empty() || name == "q" || name == "Q") continue;
+            auto matches = FindFileInTree(outDir, ToLowerAscii(name));
+            if (matches.empty())
+            {
+                std::cout << "修复库中没有这个文件。\n";
+                continue;
+            }
+            int installed = 0;
+            for (const auto& match : matches)
+                if (InstallRepairDll(match)) ++installed;
+            std::cout << "完成：匹配 " << matches.size() << " 个文件，安装 " << installed
+                      << " 个。建议重新运行需要该 DLL 的程序验证。\n";
+        }
+        else if (choice == 2)
+        {
+            std::cout << "将把修复库内全部 DLL 安装到 System32 / SysWOW64（已有文件自动备份为 .stb-bak）。\n";
+            std::cout << "是否继续？(y/n): ";
+            char confirm;
+            std::cin >> confirm;
+            std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+            if (confirm != 'y' && confirm != 'Y') continue;
+            int total = 0, installed = 0;
+            std::error_code walkError;
+            for (std::filesystem::recursive_directory_iterator it(outDir, walkError), end;
+                it != end && !walkError; it.increment(walkError))
+            {
+                if (walkError) break;
+                if (!it->is_regular_file() || ToLowerAscii(PathToUtf8(it->path().extension())).find(".dll") == std::string::npos) continue;
+                ++total;
+                if (InstallRepairDll(it->path().wstring())) ++installed;
+            }
+            std::cout << "全量修复完成：共 " << total << " 个 DLL，安装 " << installed << " 个。\n";
+        }
+    }
+}
+
 void DirectXRepairMenu()
 {
     while (true)
@@ -15512,9 +16011,11 @@ void DirectXRepairMenu()
                   << "1. 检查 DLL 名称并查看建议\n"
                   << "2. 安装微软 DirectX 旧版游戏运行库（需联网）\n"
                   << "3. 修复 Windows 系统组件和受保护的 DLL（DISM + SFC）\n"
-                  << "4. 打开 DirectX 诊断工具\n0. 返回\n";
+                  << "4. 打开 DirectX 诊断工具\n"
+                  << "5. DLL 修复库一键修复（DirectXRepair.7z，需手动放置）\n0. 返回\n";
         int choice = GetIntInput("请选择: ");
         if (choice == 0 || !std::cin) return;
+        if (choice == 5) { DllRepositoryRepair(); continue; }
         if (choice == 1)
         {
             std::string name = UnquotePath(GetInput("输入缺失的 DLL 文件名（例如 d3dx9_43.dll）: "));

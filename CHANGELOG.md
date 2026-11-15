@@ -1,6 +1,24 @@
 # 更新日志
 
+## npm 1.12.0 — 2026-11-15
+
+### DLL 修复库（主菜单 37 → 5，图吧 DirectX_Repair 数据包兼容）
+
+- 新增 DLL 修复库一键修复：把图吧工具箱 DirectX_Repair 的 Data 目录（A/B/C/L，100 个 DLL，约 119MB）打包为 DirectXRepair.7z（约 90MB），工具箱自动解压到数据目录并支持按文件名修复与全量修复。
+- 安装时读取 PE 头自动判断 32/64 位并分别放入 SysWOW64 / System32；已有文件自动备份为 .stb-bak。
+- 压缩包需放置在 EXE 同目录或 drivers 目录；发布页提供 DirectXRepair.7z 独立附件；解压需 7z.exe（自动搜索 PATH、Program Files、EXE 目录）。
+
+### DirectX 12 测试（主菜单 22 → 6）
+
+- 新增 D3D12 渲染压测：设备特性等级检测（11_0/11_1/12_0/12_1）、D3D12 命令队列 + FLIP_DISCARD 交换链 + fence 同步的清屏渲染循环，实时 FPS（标题栏），ESC 退出。
+
+### 驱动工具扩展（主菜单 23 → 22/23）
+
+- 注入驱动到离线系统目录（DISM /Image /Add-Driver /Recurse）：适用于部署的系统目录、挂载的 install.wim/boot.wim 与 WinPE，可选强制注入未签名驱动。
+- 一键更新缺失驱动：通过微软官方 Windows Update COM 接口按设备硬件 ID 自动匹配、下载并安装全部缺失驱动（WU 服务被禁用时自动提示恢复），完成后 pnputil 扫描设备变更。
+
 ## npm 1.11.0 — 2026-11-15
+
 
 ### 网卡吞吐量与镜像源（主菜单 39）
 
