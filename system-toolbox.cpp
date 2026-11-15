@@ -2950,7 +2950,9 @@ struct HwCdrom
 struct HwGpu
 {
     std::string name;
+    std::string vendor; // NVIDIA / AMD
     unsigned long handle = 0;
+    int amdAdapterIndex = -1;
 };
 
 struct HwEngine
@@ -3146,6 +3148,7 @@ struct NvApiFunctions
     unsigned long (__cdecl* enumPhysicalGpus)(unsigned long*, unsigned long*) = nullptr;
     unsigned long (__cdecl* getThermalSettings)(unsigned long, unsigned long, void*) = nullptr;
     unsigned long (__cdecl* getFullName)(unsigned long, wchar_t*) = nullptr;
+    unsigned long (__cdecl* getCoolerSettings)(unsigned long, unsigned long, void*) = nullptr;
 };
 
 NvApiFunctions& GetNvApiFuncs()
@@ -3166,6 +3169,7 @@ void LoadNvApiIntoEngine(HwEngine& engine)
     nv.enumPhysicalGpus = reinterpret_cast<unsigned long (__cdecl*)(unsigned long*, unsigned long*)>(nv.queryInterface(0xE5AC921F));
     nv.getThermalSettings = reinterpret_cast<unsigned long (__cdecl*)(unsigned long, unsigned long, void*)>(nv.queryInterface(0xE3640A56));
     nv.getFullName = reinterpret_cast<unsigned long (__cdecl*)(unsigned long, wchar_t*)>(nv.queryInterface(0xCEEE8E9F));
+    nv.getCoolerSettings = reinterpret_cast<unsigned long (__cdecl*)(unsigned long, unsigned long, void*)>(nv.queryInterface(0xDA053847));
     if (!nv.initialize || !nv.enumPhysicalGpus || !nv.getThermalSettings) return;
     if (nv.initialize() != 0) return;
     unsigned long handles[64] = {};
@@ -3175,6 +3179,7 @@ void LoadNvApiIntoEngine(HwEngine& engine)
     {
         HwGpu gpu;
         gpu.handle = handles[i];
+        gpu.vendor = "NVIDIA";
         wchar_t name[64] = L"";
         if (nv.getFullName && nv.getFullName(handles[i], name) == 0 && name[0])
             gpu.name = WideToUtf8Text(name);
@@ -3182,6 +3187,404 @@ void LoadNvApiIntoEngine(HwEngine& engine)
     }
     nv.ready = true;
     engine.nvapiReady = true;
+}
+
+// ==================== WinRing0 内核驱动管理（CPU MSR 温度与 EC 风扇，驱动由用户手动放置） ====================
+// 驱动来源：LibreHardwareMonitor v0.9.2 仓库（WinRing0x64.sys，OpenLibSys WinRing0 1.2.0.5 修改版）
+#include <intrin.h>
+
+struct Ring0Driver
+{
+    bool attempted = false;
+    bool loaded = false;
+    HANDLE device = INVALID_HANDLE_VALUE;
+    std::string sysPath;
+    std::string hash;
+    DWORD loadError = 0;
+};
+
+Ring0Driver& GetRing0Driver() { static Ring0Driver driver; return driver; }
+
+// 查找用户放置的驱动文件（EXE 目录或数据目录 drivers 子目录）
+bool Ring0FindDriverFile(std::string& pathOut)
+{
+    wchar_t exePath[32768] = L"";
+    GetModuleFileNameW(nullptr, exePath, 32768);
+    std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
+    std::vector<std::filesystem::path> candidates = {
+        exeDir / L"WinRing0x64.sys",
+        GetToolboxDataDirectory() / L"drivers" / L"WinRing0x64.sys"
+    };
+    for (const auto& candidate : candidates)
+    {
+        std::error_code error;
+        if (std::filesystem::exists(candidate, error))
+        {
+            pathOut = PathToUtf8(candidate);
+            return true;
+        }
+    }
+    return false;
+}
+
+// 创建并启动驱动服务，打开设备（兼容多个设备名；处理服务“待删除”竞态）
+bool Ring0Load()
+{
+    Ring0Driver& driver = GetRing0Driver();
+    if (driver.loaded && driver.device != INVALID_HANDLE_VALUE) return true;
+    if (driver.attempted) return false;
+    driver.attempted = true;
+
+    if (!Ring0FindDriverFile(driver.sysPath)) return false;
+    driver.hash = GetFileSHA256(driver.sysPath);
+
+    const wchar_t* serviceName = L"WinRing0x64";
+    bool started = false;
+    for (int attempt = 0; attempt < 3 && !started; ++attempt)
+    {
+        if (attempt > 0) Sleep(1200); // 服务“标记删除”释放需要时间
+        SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
+        if (!scm) return false;
+        SC_HANDLE service = OpenServiceW(scm, serviceName, SERVICE_ALL_ACCESS);
+        if (!service)
+            service = CreateServiceW(scm, serviceName, L"WinRing0x64 (System Toolbox)",
+                SERVICE_ALL_ACCESS, SERVICE_KERNEL_DRIVER, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL,
+                std::filesystem::u8path(driver.sysPath).wstring().c_str(), nullptr, nullptr, nullptr, nullptr, nullptr);
+        CloseServiceHandle(scm);
+        if (!service)
+        {
+            driver.loadError = GetLastError(); // 1073：待删除状态
+            continue;
+        }
+        started = StartServiceW(service, 0, nullptr) != FALSE;
+        if (!started && GetLastError() == ERROR_SERVICE_ALREADY_RUNNING) started = true;
+        if (!started && GetLastError() == ERROR_SERVICE_DISABLED)
+        {
+            // 服务被外部置为禁用（杀软/系统动作），恢复为手动启动后重试
+            ChangeServiceConfigW(service, SERVICE_NO_CHANGE, SERVICE_DEMAND_START, SERVICE_NO_CHANGE,
+                nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+            started = StartServiceW(service, 0, nullptr) != FALSE;
+        }
+        if (!started)
+        {
+            driver.loadError = GetLastError();
+            // 1072 标记删除 / 1058 禁用等僵尸状态：尝试停止+删除后重建
+            if (driver.loadError == ERROR_SERVICE_MARKED_FOR_DELETE || driver.loadError == ERROR_SERVICE_DISABLED)
+            {
+                SERVICE_STATUS status{};
+                ControlService(service, SERVICE_CONTROL_STOP, &status);
+                DeleteService(service);
+            }
+        }
+        CloseServiceHandle(service);
+    }
+    if (!started)
+    {
+        return false;
+    }
+    driver.loaded = true;
+
+    const wchar_t* deviceNames[] = { L"\\\\.\\WinRing0_1_2_0", L"\\\\.\\WinRing0_64", L"\\\\.\\WinRing0x64", L"\\\\.\\WinRing0" };
+    for (const wchar_t* name : deviceNames)
+    {
+        driver.device = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (driver.device != INVALID_HANDLE_VALUE) return true;
+    }
+    driver.loaded = false;
+    driver.loadError = GetLastError();
+    return false;
+}
+
+// WinRing0 IOCTL（与 LibreHardwareMonitor v0.9.2 配套版本一致；含访问权限位 Read=1<<14、Write=2<<14）
+static const DWORD RING0_READ_MSR = 0x9C402084;           // 功能 0x821，Any
+static const DWORD RING0_WRITE_MSR = 0x9C40208A;          // 功能 0x822，Write
+static const DWORD RING0_READ_IO_PORT_BYTE = 0x9C4060CC;  // 功能 0x833，Read
+static const DWORD RING0_WRITE_IO_PORT_BYTE = 0x9C40A0DA; // 功能 0x836，Write
+static const DWORD RING0_READ_PCI_CONFIG = 0x9C406145;    // 功能 0x851，Read
+static const DWORD RING0_WRITE_PCI_CONFIG = 0x9C40A14A;   // 功能 0x852，Write
+
+bool Ring0ReadMsr(unsigned long index, unsigned long long& value)
+{
+    Ring0Driver& driver = GetRing0Driver();
+    if (driver.device == INVALID_HANDLE_VALUE) return false;
+    DWORD index32 = index;
+    ULARGE_INTEGER out{};
+    DWORD returned = 0;
+    if (DeviceIoControl(driver.device, RING0_READ_MSR, &index32, sizeof(index32), &out, sizeof(out), &returned, nullptr) && returned == 8)
+    {
+        value = out.QuadPart;
+        return true;
+    }
+    ULARGE_INTEGER index64{};
+    index64.QuadPart = index;
+    if (DeviceIoControl(driver.device, RING0_READ_MSR, &index64, sizeof(index64), &out, sizeof(out), &returned, nullptr) && returned == 8)
+    {
+        value = out.QuadPart;
+        return true;
+    }
+    return false;
+}
+
+bool Ring0ReadIoPortByte(unsigned short port, unsigned char& value)
+{
+    Ring0Driver& driver = GetRing0Driver();
+    if (driver.device == INVALID_HANDLE_VALUE) return false;
+    DWORD in = port;
+    DWORD returned = 0;
+    unsigned char out = 0;
+    if (DeviceIoControl(driver.device, RING0_READ_IO_PORT_BYTE, &in, sizeof(in), &out, sizeof(out), &returned, nullptr))
+    {
+        value = out;
+        return true;
+    }
+    return false;
+}
+
+bool Ring0WriteIoPortByte(unsigned short port, unsigned char value)
+{
+    Ring0Driver& driver = GetRing0Driver();
+    if (driver.device == INVALID_HANDLE_VALUE) return false;
+#pragma pack(push, 1)
+    struct { DWORD port; BYTE value; } in = { port, value };
+#pragma pack(pop)
+    DWORD returned = 0;
+    return DeviceIoControl(driver.device, RING0_WRITE_IO_PORT_BYTE, &in, sizeof(in), nullptr, 0, &returned, nullptr) != FALSE;
+}
+
+// Intel DTS：每核 0x19C + TjMax 0x1A2（切核读取）；AMD Zen：SMN 0x59800 经 PCI 配置空间
+bool ReadEngineCpuTemperature(double& celsiusOut)
+{
+    if (!Ring0Load()) return false;
+    int cpuInfo[4] = {};
+    __cpuid(cpuInfo, 0);
+    char vendor[13] = {};
+    memcpy(vendor, &cpuInfo[1], 4);
+    memcpy(vendor + 4, &cpuInfo[3], 4);
+    memcpy(vendor + 8, &cpuInfo[2], 4);
+    vendor[12] = 0;
+
+    HANDLE thread = GetCurrentThread();
+    DWORD_PTR originalMask = SetThreadAffinityMask(thread, 1);
+
+    bool result = false;
+    if (strstr(vendor, "GenuineIntel"))
+    {
+        unsigned long long tj = 0;
+        if (Ring0ReadMsr(0x1A2, tj))
+        {
+            unsigned tjMax = (tj >> 16) & 0xFF;
+            if (!tjMax || tjMax > 130) tjMax = 100;
+            unsigned hwThreads = std::thread::hardware_concurrency();
+            double hottest = -1;
+            for (unsigned i = 0; i < hwThreads && i < 64; ++i)
+            {
+                SetThreadAffinityMask(thread, 1ull << i);
+                unsigned long long therm = 0;
+                if (Ring0ReadMsr(0x19C, therm))
+                {
+                    unsigned delta = (therm >> 16) & 0x7F;
+                    double t = tjMax - delta;
+                    if (t > hottest) hottest = t;
+                }
+            }
+            if (hottest > 0) { celsiusOut = hottest; result = true; }
+        }
+    }
+    else if (strstr(vendor, "AuthenticAMD"))
+    {
+        // AMD Zen：SMN 地址 0x59800 写入 bus0/dev0/fn0 offset 0x60，温度从 0x64 读出（值 × 0.125 − 49）
+        unsigned long long smnAddr = 0x59800;
+        unsigned long long returned = 0;
+        (void)returned;
+        // 写 SMN 地址（PCI 配置写）
+        {
+            BYTE buffer[16] = {};
+            ULARGE_INTEGER addr{}; addr.QuadPart = 0x80000000 | (0 << 8) | (0 << 3) | 0x60; // bus0 dev0 fn0 reg60
+            memcpy(buffer, &addr, 8);
+            DWORD enable = 1;
+            memcpy(buffer + 8, &enable, 4);
+            memcpy(buffer + 12, &smnAddr, 4);
+            DWORD returnedBytes = 0;
+            DeviceIoControl(GetRing0Driver().device, RING0_WRITE_PCI_CONFIG, buffer, sizeof(buffer), nullptr, 0, &returnedBytes, nullptr);
+        }
+        {
+            BYTE buffer[8] = {};
+            ULARGE_INTEGER addr{}; addr.QuadPart = 0x80000000 | (0 << 8) | (0 << 3) | 0x64;
+            memcpy(buffer, &addr, 8);
+            DWORD out = 0, returnedBytes = 0;
+            if (DeviceIoControl(GetRing0Driver().device, RING0_READ_PCI_CONFIG, buffer, sizeof(buffer), &out, sizeof(out), &returnedBytes, nullptr))
+            {
+                double t = (out & 0x7FFFFF) * 0.125 - 49;
+                if (t > 0 && t < 120) { celsiusOut = t; result = true; }
+            }
+        }
+    }
+
+    SetThreadAffinityMask(thread, originalMask);
+    return result;
+}
+
+// EC（嵌入式控制器）读取：端口 62/66 标准协议
+bool EcWaitStatus(unsigned short statusPort, unsigned char mask, bool expectClear)
+{
+    for (int i = 0; i < 3000; ++i)
+    {
+        unsigned char status = 0;
+        if (!Ring0ReadIoPortByte(statusPort, status)) return false;
+        if (expectClear ? !(status & mask) : (status & mask)) return true;
+    }
+    return false;
+}
+
+bool EcReadRegister(unsigned short cmdPort, unsigned short dataPort, unsigned char reg, unsigned char& value)
+{
+    if (!EcWaitStatus(cmdPort, 0x02, true)) return false;            // IBF 清零
+    if (!Ring0WriteIoPortByte(cmdPort, 0x80)) return false;          // EC 读命令
+    if (!EcWaitStatus(cmdPort, 0x02, true)) return false;
+    if (!Ring0WriteIoPortByte(dataPort, reg)) return false;
+    if (!EcWaitStatus(cmdPort, 0x01, false)) return false;           // OBF 置位
+    return Ring0ReadIoPortByte(dataPort, value);
+}
+
+// ACPI 2.0 内存式 EC 读取（直接写索引端口、读数据端口）
+bool EcReadRegisterMemory(unsigned short indexPort, unsigned short dataPort, unsigned char reg, unsigned char& value)
+{
+    if (!Ring0WriteIoPortByte(indexPort, reg)) return false;
+    return Ring0ReadIoPortByte(dataPort, value);
+}
+
+// 按方式读取 EC 寄存器
+bool EcReadRegisterAny(bool commandMode, unsigned short cmdPort, unsigned short dataPort, unsigned char reg, unsigned char& value)
+{
+    return commandMode ? EcReadRegister(cmdPort, dataPort, reg, value)
+                       : EcReadRegisterMemory(cmdPort, dataPort, reg, value);
+}
+
+// ==================== AMD 显卡 ADL 探测（atiadlxx.dll 动态加载） ====================
+struct AdlFunctions
+{
+    bool ready = false;
+    HMODULE module = nullptr;
+    int (__stdcall* mainControlCreate)(void* (__stdcall*)(int), int) = nullptr;
+    int (__stdcall* numberOfAdaptersGet)(int*) = nullptr;
+    int (__stdcall* adapterInfoGet)(void*, int) = nullptr;
+    int (__stdcall* adapterActiveGet)(int, int*) = nullptr;
+    int (__stdcall* od5TemperatureGet)(int, int, void*) = nullptr;
+    int (__stdcall* od6TemperatureGet)(int, void*) = nullptr;
+    int (__stdcall* odnTemperatureGet)(int, void*) = nullptr;
+    int (__stdcall* od5FanSpeedGet)(int, int, void*) = nullptr;
+    int (__stdcall* od6FanSpeedGet)(int, void*) = nullptr;
+};
+
+AdlFunctions& GetAdlFunctions() { static AdlFunctions adl; return adl; }
+
+static void* __stdcall AdlMainMemoryAlloc(int size) { return malloc(size); }
+
+#pragma pack(push, 4)
+struct AdlAdapterInfoEntry
+{
+    int size;
+    int adapterIndex;
+    char udid[36];
+    int status;
+    int vendorId;
+    int deviceId;
+    char displayName[256];
+    char driverPath[256];
+    char driverPathExt[256];
+    char ulDriverPath[256];
+    char adapterName[256];
+    char driverVer[256];
+    int features;
+};
+#pragma pack(pop)
+
+void LoadAmdAdlIntoEngine(HwEngine& engine)
+{
+    AdlFunctions& adl = GetAdlFunctions();
+    if (adl.ready) return;
+    HMODULE module = LoadLibraryW(L"atiadlxx.dll");
+    if (!module) module = LoadLibraryW(L"atiadlxy.dll");
+    if (!module) return;
+    adl.module = module;
+    adl.mainControlCreate = reinterpret_cast<int (__stdcall*)(void* (__stdcall*)(int), int)>(GetProcAddress(module, "ADL_Main_Control_Create"));
+    adl.numberOfAdaptersGet = reinterpret_cast<int (__stdcall*)(int*)>(GetProcAddress(module, "ADL_Adapter_NumberOfAdapters_Get"));
+    adl.adapterInfoGet = reinterpret_cast<int (__stdcall*)(void*, int)>(GetProcAddress(module, "ADL_Adapter_AdapterInfo_Get"));
+    adl.adapterActiveGet = reinterpret_cast<int (__stdcall*)(int, int*)>(GetProcAddress(module, "ADL_Adapter_Active_Get"));
+    adl.od5TemperatureGet = reinterpret_cast<int (__stdcall*)(int, int, void*)>(GetProcAddress(module, "ADL_Overdrive5_Temperature_Get"));
+    adl.od6TemperatureGet = reinterpret_cast<int (__stdcall*)(int, void*)>(GetProcAddress(module, "ADL_Overdrive6_Temperature_Get"));
+    adl.odnTemperatureGet = reinterpret_cast<int (__stdcall*)(int, void*)>(GetProcAddress(module, "ADL_OverdriveN_Temperature_Get"));
+    adl.od5FanSpeedGet = reinterpret_cast<int (__stdcall*)(int, int, void*)>(GetProcAddress(module, "ADL_Overdrive5_FanSpeed_Get"));
+    adl.od6FanSpeedGet = reinterpret_cast<int (__stdcall*)(int, void*)>(GetProcAddress(module, "ADL_Overdrive6_FanSpeed_Get"));
+    if (!adl.mainControlCreate || !adl.numberOfAdaptersGet || !adl.adapterInfoGet) return;
+    if (adl.mainControlCreate(&AdlMainMemoryAlloc, 1) != 0) return;
+    int count = 0;
+    if (adl.numberOfAdaptersGet(&count) != 0 || count <= 0 || count > 32) return;
+    std::vector<AdlAdapterInfoEntry> infos(static_cast<size_t>(count));
+    int bufferSize = static_cast<int>(infos.size() * sizeof(AdlAdapterInfoEntry));
+    if (adl.adapterInfoGet(infos.data(), bufferSize) != 0) return;
+    for (int i = 0; i < count; ++i)
+    {
+        int active = 0;
+        if (adl.adapterActiveGet(infos[static_cast<size_t>(i)].adapterIndex, &active) != 0 || !active) continue;
+        HwGpu gpu;
+        gpu.name = TrimSettingText(infos[static_cast<size_t>(i)].adapterName);
+        gpu.amdAdapterIndex = infos[static_cast<size_t>(i)].adapterIndex;
+        gpu.vendor = "AMD";
+        engine.gpus.push_back(gpu);
+    }
+    adl.ready = true;
+}
+
+// 读取 AMD GPU 温度（OD5/OD6/ODN 依次尝试，毫摄氏度）
+bool ReadAmdGpuTemperature(int adapterIndex, double& celsiusOut)
+{
+    AdlFunctions& adl = GetAdlFunctions();
+    if (!adl.ready) return false;
+    struct AdlTemperature { int iTemperature; };
+    struct AdlOd6Temperature { int iSize; int iTemperature; };
+    struct AdlOdnTemperature { int iSize; int iTemperature; };
+    AdlTemperature t5{}; t5.iTemperature = 0;
+    if (adl.od5TemperatureGet && adl.od5TemperatureGet(adapterIndex, 0, &t5) == 0 && t5.iTemperature != 0)
+    {
+        celsiusOut = t5.iTemperature / 1000.0;
+        return celsiusOut > 0 && celsiusOut < 130;
+    }
+    AdlOd6Temperature t6{}; t6.iSize = sizeof(t6);
+    if (adl.od6TemperatureGet && adl.od6TemperatureGet(adapterIndex, &t6) == 0 && t6.iTemperature != 0)
+    {
+        celsiusOut = t6.iTemperature / 1000.0;
+        return celsiusOut > 0 && celsiusOut < 130;
+    }
+    AdlOdnTemperature tn{}; tn.iSize = sizeof(tn);
+    if (adl.odnTemperatureGet && adl.odnTemperatureGet(adapterIndex, &tn) == 0 && tn.iTemperature != 0)
+    {
+        celsiusOut = tn.iTemperature / 1000.0;
+        return celsiusOut > 0 && celsiusOut < 130;
+    }
+    return false;
+}
+
+// 读取 AMD GPU 风扇转速（RPM，OD5/OD6）
+bool ReadAmdGpuFanRpm(int adapterIndex, int& rpmOut)
+{
+    AdlFunctions& adl = GetAdlFunctions();
+    if (!adl.ready) return false;
+    struct AdlFanSpeedValue { int iSize; int iType; int iFanSpeed; int iFlags; };
+    struct AdlOd6FanSpeedInfo { int iSize; int iFlags; int iFanSpeedPercent; int iFanSpeedRPM; };
+    AdlFanSpeedValue f5{}; f5.iSize = sizeof(f5); f5.iType = 2; // RPM
+    if (adl.od5FanSpeedGet && adl.od5FanSpeedGet(adapterIndex, 0, &f5) == 0 && f5.iFanSpeed > 0)
+    {
+        rpmOut = f5.iFanSpeed;
+        return rpmOut < 10000;
+    }
+    AdlOd6FanSpeedInfo f6{}; f6.iSize = sizeof(f6);
+    if (adl.od6FanSpeedGet && adl.od6FanSpeedGet(adapterIndex, &f6) == 0 && f6.iFanSpeedRPM > 0)
+    {
+        rpmOut = f6.iFanSpeedRPM;
+        return rpmOut < 10000;
+    }
+    return false;
 }
 
 // NVMe SMART/Health 日志温度（原生协议命令，开尔文 → 摄氏）
@@ -3418,6 +3821,7 @@ void InitHardwareEngine()
     EnumerateDisksIntoEngine(engine);
     EnumerateThermalZonesIntoEngine(engine);
     LoadNvApiIntoEngine(engine);
+    LoadAmdAdlIntoEngine(engine);
     engine.ready = true;
 }
 
@@ -3694,34 +4098,62 @@ void HardwareRealtimePanel()
         for (size_t i = 0; i < engine.disks.size(); ++i)
             diskTempValid[i] = ReadEngineDiskTemperature(engine.disks[i], diskTempValues[i]);
 
-        // GPU 温度（NvAPI 引擎优先，nvidia-smi 兜底）
+        // GPU 温度与风扇（NVIDIA NvAPI / AMD ADL；nvidia-smi 兜底）
         std::vector<std::string> gpuLines;
-        if (engine.nvapiReady)
-        {
-            NvApiFunctions& nv = GetNvApiFuncs();
 #pragma pack(push, 1)
-            struct NvThermalSettings
-            {
-                unsigned long version, count;
-                struct { unsigned long controller, target, currentTemp, defaultTemp, maxTemp, minimumTemp, flags; } sensor[4];
-            };
+        struct NvThermalSettings
+        {
+            unsigned long version, count;
+            struct { unsigned long controller, target, currentTemp, defaultTemp, maxTemp, minimumTemp, flags; } sensor[4];
+        };
+        struct NvCoolerSettings
+        {
+            unsigned long version, count;
+            struct { unsigned long controller, currentMinLevel, currentMaxLevel, currentLevel, defaultMinLevel, defaultMaxLevel, defaultLevel, flags; } cooler[3];
+        };
 #pragma pack(pop)
-            for (const auto& gpu : engine.gpus)
+        for (const auto& gpu : engine.gpus)
+        {
+            if (gpu.vendor == "NVIDIA" && engine.nvapiReady)
             {
+                NvApiFunctions& nv = GetNvApiFuncs();
                 NvThermalSettings settings{};
                 settings.version = (sizeof(NvThermalSettings) << 16) | 1;
-                double celsius = -1;
-                if (nv.getThermalSettings && nv.getThermalSettings(gpu.handle, 1, &settings) == 0 && settings.count > 0)
-                    celsius = settings.sensor[0].currentTemp;
                 std::ostringstream line;
                 line << "  GPU " << (gpu.name.empty() ? "NVIDIA" : gpu.name) << ": ";
-                if (celsius >= 0) line << std::fixed << std::setprecision(0) << celsius << "°C";
-                else line << "读取失败";
+                if (nv.getThermalSettings && nv.getThermalSettings(gpu.handle, 1, &settings) == 0 && settings.count > 0)
+                    line << std::fixed << std::setprecision(0) << settings.sensor[0].currentTemp << "°C";
+                else
+                    line << "温度读取失败";
+                if (nv.getCoolerSettings)
+                {
+                    NvCoolerSettings cooler{};
+                    cooler.version = (sizeof(NvCoolerSettings) << 16) | 1;
+                    if ((nv.getCoolerSettings(gpu.handle, 0, &cooler) == 0 && cooler.count > 0)
+                        || (cooler.version = (sizeof(NvCoolerSettings) << 16) | 1, nv.getCoolerSettings(gpu.handle, 1, &cooler) == 0 && cooler.count > 0))
+                        line << "  风扇 " << cooler.cooler[0].currentLevel << "%";
+                }
+                gpuLines.push_back(line.str());
+            }
+            else if (gpu.vendor == "AMD")
+            {
+                double t = 0;
+                int rpm = 0;
+                std::ostringstream line;
+                line << "  GPU " << (gpu.name.empty() ? "AMD" : gpu.name) << ": ";
+                if (ReadAmdGpuTemperature(gpu.amdAdapterIndex, t))
+                    line << std::fixed << std::setprecision(1) << t << "°C";
+                else
+                    line << "温度读取失败";
+                if (ReadAmdGpuFanRpm(gpu.amdAdapterIndex, rpm))
+                    line << "  风扇 " << rpm << " RPM";
                 gpuLines.push_back(line.str());
             }
         }
-        else if (hasNvidiaSmi)
+        if (gpuLines.empty())
         {
+            if (hasNvidiaSmi)
+            {
             FILE* pipe = _popen("nvidia-smi --query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits", "r");
             if (pipe)
             {
@@ -3751,6 +4183,7 @@ void HardwareRealtimePanel()
                 }
                 _pclose(pipe);
             }
+            }
         }
 
         // 渲染（curl 式：每轮清屏重绘）
@@ -3772,6 +4205,9 @@ void HardwareRealtimePanel()
               << " / " << mem.ullTotalPhys / (1024.0 * 1024 * 1024)
               << " GB（" << mem.dwMemoryLoad << "%）";
         std::cout << usage.str() << "\n";
+        double cpuTempReading = 0;
+        if (ReadEngineCpuTemperature(cpuTempReading))
+            std::cout << "CPU 温度: " << std::fixed << std::setprecision(1) << cpuTempReading << "°C（MSR DTS）\n";
         std::cout << "温度监控:\n";
 
         if (!zones.empty())
@@ -3789,7 +4225,7 @@ void HardwareRealtimePanel()
         else if (hasNvidiaSmi)
             std::cout << "  GPU: nvidia-smi 未返回数据\n";
         else
-            std::cout << "  GPU: 未检测到 nvidia-smi（NVIDIA 显卡装好驱动后可用），其他品牌无通用温度接口\n";
+            std::cout << "  GPU: 未检测到独立显卡（Intel/AMD 核显温度包含在上面的热区读数中）\n";
 
         if (!engine.disks.empty())
         {
@@ -3812,6 +4248,170 @@ void HardwareRealtimePanel()
     Pause();
 }
 
+// CPU 温度与 EC 风扇监测（WinRing0 内核驱动，驱动文件由用户手动放置）
+void CpuEcFanMonitor()
+{
+    ClearScreen();
+    std::cout << "========== CPU 温度与 EC 风扇（WinRing0） ==========\n\n";
+
+    std::string driverPath;
+    if (!Ring0FindDriverFile(driverPath))
+    {
+        std::cout << "未找到 WinRing0x64.sys 内核驱动。本功能需要它读取 CPU MSR 温度与 EC 风扇转速。\n\n";
+        std::cout << "手动获取（任选其一）：\n";
+        std::cout << "  1. LibreHardwareMonitor 官方仓库驱动（v0.9.2 直链）：\n";
+        std::cout << "     https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/raw/v0.9.2/LibreHardwareMonitorLib/Resources/WinRing0x64.sys\n";
+        std::cout << "  2. 从已安装的 LibreHardwareMonitor / FanControl 软件目录提取 WinRing0x64.sys。\n\n";
+        std::cout << "下载后放到工具箱 EXE 同目录，或 drivers 目录：\n  "
+                  << PathToUtf8(GetToolboxDataDirectory() / L"drivers") << "\n\n";
+        std::cout << "注意：该驱动已被微软列入易受攻击驱动名单，部分杀软可能报毒；系统开启内存完整性\n";
+        std::cout << "（HVCI）时无法加载。是否使用由您自行判断，工具箱发行包不会捆绑该驱动。\n";
+        Pause();
+        return;
+    }
+    if (!Ring0Load())
+    {
+        std::cout << "驱动加载失败（文件: " << driverPath << "，错误码 " << GetRing0Driver().loadError << "）。\n";
+        std::cout << "常见原因：缺少管理员权限、被杀软拦截、系统开启内存完整性（HVCI）、服务处于待删除状态（稍候重试）。\n";
+        std::cout << "驱动 SHA256: " << GetRing0Driver().hash << "\n";
+        Pause();
+        return;
+    }
+    std::cout << "驱动已加载: " << driverPath << "\n";
+    std::cout << "驱动 SHA256: " << GetRing0Driver().hash << "\n\n";
+
+    // CPU 温度（MSR）
+    double cpuTemp = 0;
+    if (ReadEngineCpuTemperature(cpuTemp))
+        std::cout << "CPU 温度: " << std::fixed << std::setprecision(1) << cpuTemp << "°C（MSR DTS，取最热核心）\n";
+    else
+        std::cout << "CPU 温度: 读取失败（当前 CPU 架构暂不支持）\n";
+
+    // GPU 温度/风扇（AMD/NVIDIA）
+    HwEngine& engine = GetHardwareEngine();
+    for (const auto& gpu : engine.gpus)
+    {
+        if (gpu.vendor == "AMD")
+        {
+            double t = 0;
+            int rpm = 0;
+            std::cout << "AMD 显卡 " << gpu.name << ": ";
+            if (ReadAmdGpuTemperature(gpu.amdAdapterIndex, t))
+                std::cout << std::fixed << std::setprecision(1) << t << "°C";
+            else
+                std::cout << "温度读取失败";
+            if (ReadAmdGpuFanRpm(gpu.amdAdapterIndex, rpm))
+                std::cout << "  风扇 " << rpm << " RPM";
+            std::cout << "\n";
+        }
+        else if (gpu.vendor == "NVIDIA" && engine.nvapiReady)
+        {
+            NvApiFunctions& nv = GetNvApiFuncs();
+#pragma pack(push, 1)
+            struct NvThermalSettings
+            {
+                unsigned long version, count;
+                struct { unsigned long controller, target, currentTemp, defaultTemp, maxTemp, minimumTemp, flags; } sensor[4];
+            };
+            struct NvCoolerSettings
+            {
+                unsigned long version, count;
+                struct { unsigned long controller, currentMinLevel, currentMaxLevel, currentLevel, defaultMinLevel, defaultMaxLevel, defaultLevel, flags; } cooler[3];
+            };
+#pragma pack(pop)
+            NvThermalSettings settings{};
+            settings.version = (sizeof(NvThermalSettings) << 16) | 1;
+            std::cout << "NVIDIA 显卡 " << gpu.name << ": ";
+            if (nv.getThermalSettings && nv.getThermalSettings(gpu.handle, 1, &settings) == 0 && settings.count > 0)
+                std::cout << settings.sensor[0].currentTemp << "°C";
+            else
+                std::cout << "温度读取失败";
+            if (nv.getCoolerSettings)
+            {
+                NvCoolerSettings cooler{};
+                cooler.version = (sizeof(NvCoolerSettings) << 16) | 1;
+                if ((nv.getCoolerSettings(gpu.handle, 0, &cooler) == 0 && cooler.count > 0)
+                    || (cooler.version = (sizeof(NvCoolerSettings) << 16) | 1, nv.getCoolerSettings(gpu.handle, 1, &cooler) == 0 && cooler.count > 0))
+                    std::cout << "  风扇 " << cooler.cooler[0].currentLevel << "%";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    // EC 寄存器转储与风扇候选（实验性）
+    // 自动选择访问方式：标准 62/66 命令模式、62/66 内存模式、ACPI 2.0 380/384 内存模式
+    struct EcMethod { const char* label; unsigned short indexPort; unsigned short dataPort; bool commandMode; };
+    const EcMethod methods[] = {
+        { "标准端口 62/66（命令模式）", 0x66, 0x62, true },
+        { "标准端口 62/66（内存模式）", 0x62, 0x62, false },
+        { "ACPI 2.0 端口 380/384（内存模式）", 0x380, 0x384, false }
+    };
+    const EcMethod* chosen = nullptr;
+    int bestNonZero = 0;
+    for (const auto& method : methods)
+    {
+        int successes = 0, nonZero = 0;
+        for (int reg = 0; reg < 32; ++reg)
+        {
+            unsigned char value = 0;
+            if (EcReadRegisterAny(method.commandMode, method.indexPort, method.dataPort, static_cast<unsigned char>(reg), value))
+            {
+                ++successes;
+                if (value != 0 && value != 0xFF) ++nonZero;
+            }
+        }
+        if (successes > 128 && nonZero > bestNonZero)
+        {
+            bestNonZero = nonZero;
+            chosen = &method;
+        }
+    }
+    if (!chosen)
+    {
+        std::cout << "\nEC 读取：未能通过任何已知端口访问到 EC（部分笔记本 EC 需厂商专用接口），风扇转速不可用。\n";
+        Pause();
+        return;
+    }
+    std::cout << "\nEC 访问方式: " << chosen->label << "\n";
+    std::cout << "EC 寄存器转储（00-FF）：\n";
+    unsigned char ec[256] = {};
+    int ecOk = 0;
+    for (int reg = 0; reg < 256; ++reg)
+    {
+        unsigned char value = 0;
+        if (EcReadRegisterAny(chosen->commandMode, chosen->indexPort, chosen->dataPort, static_cast<unsigned char>(reg), value))
+        {
+            ec[reg] = value;
+            ++ecOk;
+        }
+    }
+    for (int row = 0; row < 16; ++row)
+    {
+        std::cout << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << row * 16 << ": "
+                  << std::setfill(' ');
+        for (int col = 0; col < 16; ++col)
+            std::cout << std::hex << std::setw(2) << static_cast<int>(ec[row * 16 + col]) << " ";
+        std::cout << "\n";
+    }
+    std::cout << std::dec << "（成功读取 " << ecOk << " / 256 个寄存器）\n";
+
+    std::cout << "\n风扇转速候选（实验性：相邻字节对解释为 RPM，仅供对照）：\n";
+    int candidates = 0;
+    for (int reg = 0; reg < 255 && candidates < 10; ++reg)
+    {
+        int rpm = ec[reg] * 256 + ec[reg + 1];
+        if (rpm >= 120 && rpm <= 6000)
+        {
+            std::cout << "  EC 0x" << std::hex << reg << "-0x" << (reg + 1) << std::dec << ": " << rpm << " RPM\n";
+            ++candidates;
+        }
+    }
+    if (candidates == 0)
+        std::cout << "  未发现明显转速值（不同厂商寄存器映射不同，请多次采样对比变化，结合 EC 转储定位）。\n";
+    std::cout << "\n提示：CPU/系统风扇一般需要厂商专用寄存器映射；EC 转储可帮助自行定位。\n";
+    Pause();
+}
+
 // 硬件实时监测菜单
 void HardwareMonitorMenu()
 {
@@ -3823,6 +4423,7 @@ void HardwareMonitorMenu()
         std::cout << " 2. 内存插槽信息（占用/总数/模块详情）\n";
         std::cout << " 3. 硬盘与存储插槽（IDE/SATA/mSATA/CD-ROM/NVMe/NGFF）\n";
         std::cout << " 4. RAM 基准测试（读取/写入/复制）\n";
+        std::cout << " 5. CPU 温度与 EC 风扇（WinRing0，需手动放置驱动）\n";
         std::cout << " 0. 返回主菜单\n";
         std::cout << "==================================\n";
         int choice = GetIntInput("请选择: ");
@@ -3831,6 +4432,7 @@ void HardwareMonitorMenu()
         else if (choice == 2) MemorySlotInfo();
         else if (choice == 3) DiskSlotInfo();
         else if (choice == 4) MemoryBandwidthMenu();
+        else if (choice == 5) CpuEcFanMonitor();
         else { std::cout << "无效选项。" << std::endl; Pause(); }
     }
 }
