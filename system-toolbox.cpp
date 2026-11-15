@@ -1484,6 +1484,52 @@ void CleanDiskC()
 }
 
 // ==================== 2. Windows 更新管理 ====================
+// ==================== 服务状态查询辅助 ====================
+
+// 查询服务启动类型（SERVICE_DISABLED / SERVICE_DEMAND_START 等；查询失败返回 0xFFFFFFFF）
+DWORD QueryServiceStartType(const wchar_t* serviceName)
+{
+    SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!manager) return 0xFFFFFFFF;
+    SC_HANDLE service = OpenServiceW(manager, serviceName, SERVICE_QUERY_CONFIG);
+    if (!service) { CloseServiceHandle(manager); return 0xFFFFFFFF; }
+    DWORD bytesNeeded = 0;
+    DWORD startType = 0xFFFFFFFF;
+    if (QueryServiceConfigW(service, nullptr, 0, &bytesNeeded) || GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+    {
+        std::vector<char> buffer(bytesNeeded);
+        QUERY_SERVICE_CONFIGW* config = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buffer.data());
+        if (QueryServiceConfigW(service, config, bytesNeeded, &bytesNeeded))
+            startType = config->dwStartType;
+    }
+    CloseServiceHandle(service);
+    CloseServiceHandle(manager);
+    return startType;
+}
+
+// 查询服务运行状态（SERVICE_RUNNING / SERVICE_STOPPED；查询失败返回 0xFFFFFFFF）
+DWORD QueryServiceRunState(const wchar_t* serviceName)
+{
+    SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!manager) return 0xFFFFFFFF;
+    SC_HANDLE service = OpenServiceW(manager, serviceName, SERVICE_QUERY_STATUS);
+    if (!service) { CloseServiceHandle(manager); return 0xFFFFFFFF; }
+    SERVICE_STATUS status{};
+    DWORD runState = 0xFFFFFFFF;
+    if (QueryServiceStatus(service, &status))
+        runState = status.dwCurrentState;
+    CloseServiceHandle(service);
+    CloseServiceHandle(manager);
+    return runState;
+}
+
+// 读取 HKLM 下 DWORD 值（用于校验设置是否已生效）
+bool ReadHklmDword(const std::string& keyPath, const char* valueName, DWORD& value)
+{
+    DWORD size = sizeof(DWORD);
+    return RegGetValueA(HKEY_LOCAL_MACHINE, keyPath.c_str(), valueName, RRF_RT_REG_DWORD, nullptr, &value, &size) == ERROR_SUCCESS;
+}
+
 void ManageWindowsUpdate()
 {
     ClearScreen();
@@ -1494,19 +1540,99 @@ void ManageWindowsUpdate()
     std::cout << "=======================================\n";
     int choice = GetIntInput("请选择: ");
 
+    // 更新相关计划任务（不同系统版本任务名略有差异，不存在的直接忽略）
+    const char* updateTasks[] = {
+        "\\Microsoft\\Windows\\WindowsUpdate\\Scheduled Start",
+        "\\Microsoft\\Windows\\WindowsUpdate\\sih",
+        "\\Microsoft\\Windows\\WindowsUpdate\\sihboot",
+        "\\Microsoft\\Windows\\UpdateOrchestrator\\Universal Orchestrator Start",
+        "\\Microsoft\\Windows\\UpdateOrchestrator\\Schedule Work",
+        "\\Microsoft\\Windows\\UpdateOrchestrator\\Schedule Scan",
+        "\\Microsoft\\Windows\\UpdateOrchestrator\\USO_UxBroker"
+    };
+
     if (choice == 1)
     {
-        const bool policy = RunCmd("reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU\" /v NoAutoUpdate /t REG_DWORD /d 1 /f", true, true);
-        const bool stopped = RunCmd("sc stop wuauserv", true, true);
-        const bool configured = RunCmd("sc config wuauserv start= disabled", true, true);
-        std::cout << (policy && stopped && configured ? "Windows 更新禁用步骤已完成。" : "部分步骤未完成，请查看上方结果并确认 Windows 更新状态。") << std::endl;
+        std::cout << "\n--- 正在禁用 Windows 更新 ---\n\n";
+        // 1. 策略：关闭自动更新
+        bool policy = RunCmd("reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU\" /v NoAutoUpdate /t REG_DWORD /d 1 /f", true, true);
+        (void)policy;
+        // 2. 运行中才停止 Windows Update 服务，再设为禁用（已停止不算失败）
+        if (QueryServiceRunState(L"wuauserv") == SERVICE_RUNNING)
+            RunCmd("sc stop wuauserv", true, true);
+        RunCmd("sc config wuauserv start= disabled", true, true);
+        // 3. 禁用「Windows 更新医疗」服务：它会自动把更新设置改回去（禁用复活的元凶）。
+        //    该服务受系统保护，sc config 会被拒绝，必须直接写注册表，重启后彻底生效。
+        RunCmd("reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\WaaSMedicSvc\" /v Start /t REG_DWORD /d 4 /f", true, true);
+        // 4. 禁用更新相关计划任务
+        int taskDisabled = 0;
+        for (const char* task : updateTasks)
+        {
+            std::string cmd = std::string("schtasks /change /tn \"") + task + "\" /disable >nul 2>&1";
+            if (system(cmd.c_str()) == 0) ++taskDisabled;
+        }
+        std::cout << "已禁用 " << taskDisabled << " 个更新相关计划任务。\n";
+
+        // 5. 校验实际状态，给用户准确结论
+        bool svcDisabled = QueryServiceStartType(L"wuauserv") == SERVICE_DISABLED;
+        DWORD noAuto = 0;
+        bool policySet = ReadHklmDword("SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU", "NoAutoUpdate", noAuto) && noAuto == 1;
+        DWORD medicStart = 0;
+        bool medicDisabled = ReadHklmDword("SYSTEM\\CurrentControlSet\\Services\\WaaSMedicSvc", "Start", medicStart) && medicStart == 4;
+
+        std::cout << "\n--- 禁用结果 ---\n";
+        std::cout << "自动更新策略 (NoAutoUpdate): " << (policySet ? "已设置" : "未设置") << "\n";
+        std::cout << "Windows Update 服务: " << (svcDisabled ? "已禁用" : "未能禁用") << "\n";
+        std::cout << "更新医疗服务（会把设置改回去）: " << (medicDisabled ? "已禁用" : "未能禁用") << "\n";
+        if (policySet && svcDisabled && medicDisabled)
+        {
+            std::cout << "\nWindows 更新已禁用。\n";
+            std::cout << "建议重启电脑：重启后更新医疗服务才会彻底停止，重启前它可能把部分设置改回去。\n";
+        }
+        else
+        {
+            std::cout << "\n部分设置未生效，请确认以管理员身份运行，并查看上方错误信息。\n";
+        }
     }
     else if (choice == 2)
     {
-        const bool policy = RunCmd("reg delete \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU\" /v NoAutoUpdate /f", true, true);
-        const bool configured = RunCmd("sc config wuauserv start= auto", true, true);
-        const bool started = RunCmd("sc start wuauserv", true, true);
-        std::cout << (policy && configured && started ? "Windows 更新恢复步骤已完成。" : "部分步骤未完成，请查看上方结果并确认 Windows 更新状态。") << std::endl;
+        std::cout << "\n--- 正在恢复 Windows 更新 ---\n\n";
+        // 1. 删除禁用策略（从未设置过就跳过，不算失败）
+        DWORD noAuto = 0;
+        if (ReadHklmDword("SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU", "NoAutoUpdate", noAuto))
+            RunCmd("reg delete \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU\" /v NoAutoUpdate /f", true, true);
+        else
+            std::cout << "自动更新策略未设置过，跳过。\n";
+        // 2. 服务恢复为系统默认的手动启动；需要时系统会自动拉起
+        RunCmd("sc config wuauserv start= demand", true, true);
+        if (QueryServiceRunState(L"wuauserv") != SERVICE_RUNNING)
+            RunCmd("sc start wuauserv", true, true);
+        // 3. 恢复「更新医疗」服务默认启动类型（手动）
+        RunCmd("reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\WaaSMedicSvc\" /v Start /t REG_DWORD /d 3 /f", true, true);
+        // 4. 重新启用计划任务
+        int taskEnabled = 0;
+        for (const char* task : updateTasks)
+        {
+            std::string cmd = std::string("schtasks /change /tn \"") + task + "\" /enable >nul 2>&1";
+            if (system(cmd.c_str()) == 0) ++taskEnabled;
+        }
+        std::cout << "已启用 " << taskEnabled << " 个更新相关计划任务。\n";
+
+        // 5. 校验实际状态
+        DWORD startType = QueryServiceStartType(L"wuauserv");
+        bool svcOk = startType != SERVICE_DISABLED && startType != 0xFFFFFFFF;
+        bool running = QueryServiceRunState(L"wuauserv") == SERVICE_RUNNING;
+        DWORD medicStart = 0;
+        bool medicOk = ReadHklmDword("SYSTEM\\CurrentControlSet\\Services\\WaaSMedicSvc", "Start", medicStart) && medicStart == 3;
+
+        std::cout << "\n--- 恢复结果 ---\n";
+        std::cout << "Windows Update 服务: " << (svcOk ? "已恢复" : "未恢复")
+                  << (running ? "（运行中）" : "（未运行，需要时系统会自动启动）") << "\n";
+        std::cout << "更新医疗服务: " << (medicOk ? "已恢复" : "未恢复") << "\n";
+        if (svcOk && medicOk)
+            std::cout << "\nWindows 更新已恢复，可正常检查并安装更新。\n";
+        else
+            std::cout << "\n部分设置未生效，请确认以管理员身份运行，并查看上方错误信息。\n";
     }
     else
         std::cout << "操作取消。" << std::endl;
