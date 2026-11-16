@@ -10546,42 +10546,15 @@ void ExportLocalDriverPack()
 }
 
 // 断网装网卡驱动：解压救援包，只挑网络类 INF（Net 类）pnputil 离线安装
+std::string ExtractNetDriverPack(); // 后文定义（内嵌数据释放 + 解压）
 void InstallNetworkDriversOffline()
 {
     ClearScreen();
     std::cout << "========== 断网安装网卡驱动（救援包） ==========\n\n";
-    std::string archivePath = FindDriversArchive();
-    if (archivePath.empty())
-    {
-        std::cout << "未找到救援包 Drivers.7z。\n\n";
-        std::cout << "三种获取方式：\n";
-        std::cout << "  1. 现在还能联网？先用本菜单 2 号「本机驱动导出为救援包」做一份（推荐）。\n";
-        std::cout << "  2. 在别的电脑上用本工具箱导出，或从常见网卡驱动包整理，放到 EXE 目录。\n";
-        std::cout << "  3. 包内容：任意文件夹结构，包含网卡驱动的 INF 即可（自动识别 Net 类）。\n";
-        Pause();
-        return;
-    }
-    std::string sevenZip = FindSevenZip();
-    if (sevenZip.empty())
-    {
-        std::cout << "未找到 7z.exe。请安装 7-Zip，或把 7z.exe 放到工具箱 EXE 同目录。\n";
-        Pause();
-        return;
-    }
-    auto outDir = GetToolboxDataDirectory() / L"driverpack-extract";
-    std::error_code error;
-    std::filesystem::create_directories(outDir, error);
-    std::cout << "救援包: " << archivePath << "\n";
-    std::cout << "正在解压...\n" << std::flush;
-    if (!RunProcessArguments({
-        std::filesystem::u8path(sevenZip).wstring(), L"x",
-        std::filesystem::u8path(archivePath).wstring(),
-        L"-o" + outDir.wstring(), L"-y"}, false))
-    {
-        std::cout << "解压失败。\n";
-        Pause();
-        return;
-    }
+    // 内嵌/外部救援包准备并解压
+    std::string extractDir = ExtractNetDriverPack();
+    if (extractDir.empty()) { Pause(); return; }
+    std::filesystem::path outDir = std::filesystem::u8path(extractDir);
     std::cout << "解压完成。\n\n";
 
     std::cout << "正在识别网络类驱动（INF 的 Class=Net）...\n" << std::flush;
@@ -10593,20 +10566,35 @@ void InstallNetworkDriversOffline()
         if (walkError) break;
         if (!it->is_regular_file() || ToLowerAscii(PathToUtf8(it->path().extension())) != ".inf") continue;
         allInfs.push_back(it->path().wstring());
-        // 读 INF 判断类：Class=Net（网卡）
-        std::ifstream infFile(std::filesystem::path(it->path()));
-        std::string line;
+        // 读 INF 判断类：Class=Net（网卡）。兼容 UTF-16 编码的 INF（去零字节后按 ASCII 匹配）
+        std::ifstream infFile(std::filesystem::path(it->path()), std::ios::binary);
+        std::string raw((std::istreambuf_iterator<char>(infFile)), std::istreambuf_iterator<char>());
+        std::string flat;
+        flat.reserve(raw.size());
+        for (char ch : raw)
+            if (ch != '\0') flat += ch; // UTF-16LE 的 ASCII 去零即为可读文本
         bool isNet = false;
-        int linesChecked = 0;
-        while (std::getline(infFile, line) && linesChecked < 120 && !isNet)
+        // 在前 4KB 内找 Class 行（Version 节通常在文件头部）。
+        // 注意 INF 里 Class 和 = 之间可能有大量空格对齐（如 "Class                = net"）
+        std::string head = flat.substr(0, std::min<size_t>(flat.size(), 4096));
+        std::string headLower = ToLowerAscii(head);
+        size_t classPos = headLower.find("class");
+        while (classPos != std::string::npos)
         {
-            ++linesChecked;
-            std::string lower = ToLowerAscii(line);
-            if (lower.rfind("class=", 0) == 0 || lower.find("class = ") == 0 || lower.find("class=") != std::string::npos)
+            size_t cursor = classPos + 5;
+            while (cursor < headLower.size() && (headLower[cursor] == ' ' || headLower[cursor] == '\t')) ++cursor;
+            if (cursor < headLower.size() && headLower[cursor] == '=')
             {
-                if (lower.find("net") != std::string::npos && lower.find("netclient") == std::string::npos)
+                ++cursor;
+                while (cursor < headLower.size() && (headLower[cursor] == ' ' || headLower[cursor] == '\t')) ++cursor;
+                std::string value = headLower.substr(cursor, 12);
+                if (value.rfind("net", 0) == 0 && value.rfind("netclient", 0) != 0)
+                {
                     isNet = true;
+                    break;
+                }
             }
+            classPos = headLower.find("class", classPos + 5);
         }
         if (isNet) netInfs.push_back(it->path().wstring());
     }
@@ -10680,68 +10668,66 @@ void QueryDriverLibraryOnline()
 // 网卡驱动救援包菜单
 // 下载通用网卡驱动合集（覆盖 Intel/Realtek/Qualcomm/MediaTek 等常见品牌的官方驱动包，
 // 打包为 Drivers.7z 放到数据目录，供断网救急）。URL 清单与校验随版本维护。
-void DownloadNetworkDriverPack()
-{
-    ClearScreen();
-    std::cout << "========== 下载通用网卡驱动合集 ==========\n";
-    std::cout << "从各品牌官方源下载常见有线/无线网卡驱动（Intel/Realtek/Qualcomm/MediaTek），\n";
-    std::cout << "打包为 Drivers.7z 备用。断网救急时无需网络即可装回网卡驱动。\n\n";
-    std::cout << "是否开始下载？(y/n): ";
-    char confirm;
-    std::cin >> confirm;
-    std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
-    if (confirm != 'y' && confirm != 'Y') { Pause(); return; }
+// 内嵌的通用网卡驱动合集（ld -b binary 嵌入 NetDrivers.7z，28MB：
+// Intel Wi-Fi 含 AX203/AX210 全家 1089 ID、Realtek 8852BE、Qualcomm/Atheros 1611 ID、MediaTek MT792x）
+#ifdef STB_EMBED_NETDRV
+extern "C" const unsigned char _binary_NetDrivers_7z_start[];
+extern "C" const unsigned char _binary_NetDrivers_7z_end[];
+#else
+extern "C" const unsigned char _binary_NetDrivers_7z_start[1] = { 0 };
+extern "C" const unsigned char _binary_NetDrivers_7z_end[1] = { 0 };
+#endif
 
-    struct DriverEntry { const char* label; const char* url; };
-    const DriverEntry entries[] = {
-        { "Intel 以太网/无线通用安装包", "https://downloadmirror.intel.com/8494440/Wireless_Driver_23.60.0_x64.exe" },
-        { "Intel 以太网驱动", "https://downloadmirror.intel.com/8511261/Ethernet_Complete_Driver_29.5_x64.exe" },
-        { "Realtek 有线网卡（Win11 自动安装版）", "https://www.realtek.com.tw/downloads/getfile.aspx?id=3913&filename=202501.rar" },
-        { "Qualcomm/Atheros 无线驱动包", "https://dlCDnet.realtek.com.tw/UpLoadFile/Driver/20250102_WiFi_Driver.rar" }
-    };
-    auto packDir = GetToolboxDataDirectory() / L"driverpack-net";
+// 准备网卡救援包：外部 Drivers.7z 优先，其次从 EXE 内嵌数据释放到数据目录
+std::string PrepareNetDriverPack()
+{
+    // 1. 外部已有包直接用
+    std::string archivePath = FindDriversArchive();
+    if (!archivePath.empty()) return archivePath;
+    // 2. 内嵌数据释放
+    size_t embeddedSize = static_cast<size_t>(_binary_NetDrivers_7z_end - _binary_NetDrivers_7z_start);
+    if (embeddedSize <= 1024) return "";
+    auto target = GetToolboxDataDirectory() / L"drivers" / L"Drivers.7z";
     std::error_code error;
-    std::filesystem::create_directories(packDir, error);
-    int ok = 0, failed = 0;
-    for (const auto& entry : entries)
+    std::filesystem::create_directories(target.parent_path(), error);
+    std::ofstream out(target, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) return "";
+    out.write(reinterpret_cast<const char*>(_binary_NetDrivers_7z_start),
+        static_cast<std::streamsize>(embeddedSize));
+    out.close();
+    if (!out) return "";
+    return PathToUtf8(target);
+}
+
+// 从内嵌/外部救援包准备并解压，返回解压目录（空串表示失败）
+std::string ExtractNetDriverPack()
+{
+    std::string archivePath = PrepareNetDriverPack();
+    if (archivePath.empty())
     {
-        std::cout << "\n--- " << entry.label << " ---\n";
-        std::string fileName = entry.url;
-        size_t slash = fileName.find_last_of('/');
-        if (slash != std::string::npos) fileName = fileName.substr(slash + 1);
-        if (DownloadWithCurlInsecure(entry.url, PathToUtf8(packDir / std::filesystem::u8path(fileName))))
-            ++ok;
-        else
-        {
-            std::cout << "下载失败（跳过，稍后可单独重试）。\n";
-            ++failed;
-        }
-    }
-    std::cout << "\n下载完成：成功 " << ok << " 个，失败 " << failed << " 个。\n";
-    if (ok == 0)
-    {
-        std::cout << "全部失败，请检查网络后重试。\n";
-        Pause();
-        return;
+        std::cout << "内嵌网卡驱动合集不可用，且未找到外部 Drivers.7z。\n";
+        return "";
     }
     std::string sevenZip = FindSevenZip();
     if (sevenZip.empty())
     {
-        std::cout << "已下载到 " << PathToUtf8(packDir) << "，但未找到 7z.exe，无法打包 Drivers.7z。\n";
-        Pause();
-        return;
+        std::cout << "未找到 7z.exe。请安装 7-Zip，或把 7z.exe 放到工具箱 EXE 同目录。\n";
+        return "";
     }
-    auto archivePath = GetToolboxDataDirectory() / L"drivers" / L"Drivers.7z";
-    std::filesystem::create_directories(archivePath.parent_path(), error);
-    std::cout << "\n正在打包为 Drivers.7z...\n" << std::flush;
-    if (RunProcessArguments({
-        std::filesystem::u8path(sevenZip).wstring(), L"a",
-        std::filesystem::path(archivePath),
-        std::filesystem::path(packDir.wstring() + L"\\*"), L"-y"}, false))
-        std::cout << "通用网卡驱动合集已生成: " << PathToUtf8(archivePath) << "\n";
-    else
-        std::cout << "打包失败，原始文件保留在 " << PathToUtf8(packDir) << "\n";
-    Pause();
+    auto outDir = GetToolboxDataDirectory() / L"driverpack-extract";
+    std::error_code error;
+    std::filesystem::create_directories(outDir, error);
+    std::cout << "驱动合集: " << archivePath << "\n";
+    std::cout << "正在解压（28MB，需要几秒）...\n" << std::flush;
+    if (!RunProcessArguments({
+        std::filesystem::u8path(sevenZip).wstring(), L"x",
+        std::filesystem::u8path(archivePath).wstring(),
+        L"-o" + outDir.wstring(), L"-y"}, false))
+    {
+        std::cout << "解压失败。\n";
+        return "";
+    }
+    return PathToUtf8(outDir);
 }
 
 void NetworkDriverRescueMenu()
@@ -10750,16 +10736,27 @@ void NetworkDriverRescueMenu()
     {
         ClearScreen();
         std::cout << "========== 网卡驱动救援包 ==========\n";
-        std::cout << "断网救急三步：提前备包 → 断网装网卡驱动 → 回在线补齐全套。\n\n";
-        std::cout << " 1. 下载通用网卡驱动合集（Intel/Realtek/Qualcomm 等常见品牌，推荐）\n";
-        std::cout << " 2. 断网安装网卡驱动（解压救援包，自动识别 Net 类 INF 离线安装）\n";
+        std::cout << "断网救急：内置 4 品牌网卡驱动（2728 个设备 ID），断网直接装回网卡。\n\n";
+        std::cout << " 1. 查看内嵌网卡驱动合集（Intel Wi-Fi 含 AX203/AX210、Realtek、Qualcomm、MediaTek）\n";
+        std::cout << " 2. 断网安装网卡驱动（自动从内嵌数据释放并安装 Net 类 INF）\n";
         std::cout << " 3. 在线查询驱动库（Windows Update 当前为本机提供的驱动数量与清单）\n";
         std::cout << " 4. 本机驱动导出为救援包（DISM 导出本机全部第三方驱动，仅做补充备份）\n";
         std::cout << " 0. 返回上级\n";
         std::cout << "====================================\n";
         int choice = GetIntInput("请选择: ");
         if (choice == 0) break;
-        else if (choice == 1) DownloadNetworkDriverPack();
+        else if (choice == 1)
+        {
+            ClearScreen();
+            std::cout << "========== 内嵌网卡驱动合集 ==========\n\n";
+            std::cout << "本程序内置 4 个品牌驱动包（28MB，覆盖 2728 个硬件 ID）：\n";
+            std::cout << "  - Intel Wi-Fi：Netwtw08/Netwtw6e（AX200/AX201/AX203/AX210/AX211/9560/9260/8265 等，1089 个设备 ID）\n";
+            std::cout << "  - Realtek：8852BE Wi-Fi 6（含 TP-Link 定制版，24 个设备 ID）\n";
+            std::cout << "  - Qualcomm/Atheros：athw10x（AR9xxx/Killer 全系老网卡，1611 个设备 ID）\n";
+            std::cout << "  - MediaTek：MT7920/MT7921 Wi-Fi 6E（4 个设备 ID）\n\n";
+            std::cout << "选择 2 号即可直接断网安装（自动从内嵌数据释放），无需联网和手动下载。\n";
+            Pause();
+        }
         else if (choice == 2) InstallNetworkDriversOffline();
         else if (choice == 3) QueryDriverLibraryOnline();
         else if (choice == 4) ExportLocalDriverPack();
