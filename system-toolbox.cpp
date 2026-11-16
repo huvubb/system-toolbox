@@ -10615,13 +10615,12 @@ void InstallNetworkDriversOffline()
     int installed = 0, failed = 0;
     for (const auto& inf : netInfs)
     {
-        std::wcout << L"安装: " << inf << L"\n";
-        // pnputil 返回码对 "already exists" 也会报非零，直接看 RunCmd 结果会误判；
-        // 以日志里的实际结果为准
+        std::wcout << L"安装: " << inf << L"\n" << std::flush;
+        // pnputil 对 "already exists / up-to-date" 也返回非零（259），RunCmd 会先报红色 [失败]；
+        // 先查日志判定真实结果，判定不了才走 RunCmd，避免误报
         std::string infUtf8 = WideToUtf8Text(inf);
-        if (RunCmd("pnputil /add-driver \"" + infUtf8 + "\" /install", false, true))
-            ++installed;
-        else
+        std::string infFileName = WideToUtf8Text(std::filesystem::path(inf).filename());
+        bool logSaysOk = false;
         {
             std::error_code logError;
             auto logDir = GetToolboxDataDirectory() / L"logs";
@@ -10631,39 +10630,40 @@ void InstallNetworkDriversOffline()
             {
                 std::error_code readError;
                 if (!it->is_regular_file(readError)) continue;
-                // 只看本秒内新生成的日志（pnputil 输出会被工具箱记录）
+                // pnputil 输出被工具箱记录进日志；匹配"已入库"与"设备已是最新"两种成功表述
                 std::ifstream logFile(it->path());
                 std::string content((std::istreambuf_iterator<char>(logFile)), std::istreambuf_iterator<char>());
-                if (content.find(WideToUtf8Text(std::filesystem::path(inf).filename())) != std::string::npos &&
-                    content.find("added successfully") != std::string::npos)
+                if (content.find(infFileName) != std::string::npos &&
+                    (content.find("added successfully") != std::string::npos ||
+                     content.find("up-to-date on device") != std::string::npos))
                 {
                     logContent = content;
                     break;
                 }
             }
-            if (!logContent.empty())
-            {
-                std::cout << "  （已存在于系统驱动库，跳过重复安装）\n";
-                ++installed;
-            }
-            else
-                ++failed;
+            logSaysOk = !logContent.empty();
         }
+        if (logSaysOk)
+        {
+            std::cout << "  （驱动已在系统驱动库中，且设备已是最新版本）\n";
+            ++installed;
+        }
+        else if (RunCmd("pnputil /add-driver \"" + infUtf8 + "\" /install", false, true))
+            ++installed;
+        else
+            ++failed;
     }
-    // 扫描硬件改动：优先用 PnP 命名空间的 CMD 设备再枚举（等效设备管理器刷新，
-    // 无需重启单个设备，也就不会对 WAN Miniport 等系统关键设备报 Access is denied）
+    // 扫描硬件改动：pnputil /scan-devices 在多数环境下会被拒绝（Access is denied，
+    // 属于 pnputil 的权限模型限制，与是否管理员无关），直接用 CfgMgr32 全树重枚举，
+    // 效果等同设备管理器「扫描检测硬件改动」，且不会对 WAN Miniport 等报错误。
     std::cout << "\n正在扫描硬件改动...\n";
-    if (!RunCmd("pnputil /scan-devices", false, true))
-    {
-        std::cout << "pnputil 扫描失败，改用 CM_Reenumerate_DevNode 全树重枚举...\n";
-        RunCmd("powershell -NoProfile -Command \""
-            "Add-Type -MemberDefinition '[DllImport(\\\"CfgMgr32.dll\\\")] public static extern int CM_Reenumerate_DevNode(int devInst, uint flags); "
-            "[DllImport(\\\"CfgMgr32.dll\\\")] public static extern int CM_Locate_DevNodeW(out int devInst, string deviceId, uint flags);' -Name Pnp -Namespace Win32;"
-            "[int]$root = 0; "
-            "[Win32.Pnp]::CM_Locate_DevNodeW([ref]$root, \$null, 0) | Out-Null; "
-            "$r = [Win32.Pnp]::CM_Reenumerate_DevNode($root, 0); "
-            "Write-Host ('重枚举完成（返回码 ' + $r + '，0 表示成功）。')\"", true, true);
-    }
+    RunCmd("powershell -NoProfile -Command \""
+        "Add-Type -MemberDefinition '[DllImport(\\\"CfgMgr32.dll\\\")] public static extern int CM_Reenumerate_DevNode(int devInst, uint flags); "
+        "[DllImport(\\\"CfgMgr32.dll\\\")] public static extern int CM_Locate_DevNodeW(out int devInst, string deviceId, uint flags);' -Name Pnp -Namespace Win32;"
+        "[int]$root = 0; "
+        "[Win32.Pnp]::CM_Locate_DevNodeW([ref]$root, \$null, 0) | Out-Null; "
+        "$r = [Win32.Pnp]::CM_Reenumerate_DevNode($root, 0); "
+        "Write-Host ('重枚举完成（返回码 ' + $r + '，0 表示成功）。')\"", true, true);
     std::cout << "\n离线安装完成：成功 " << installed << " 个，失败 " << failed << " 个。\n";
 
     // 安装后检测网卡设备是否真的出现并工作（硬件不在机器上时驱动入库也不会有网卡）
