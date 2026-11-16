@@ -10,7 +10,9 @@
 ### 网卡驱动救援包（驱动工具 → 24）
 
 - 内嵌通用网卡驱动合集（推荐）：构建时嵌入 Intel/Realtek/Qualcomm/MediaTek 四品牌官方驱动（NetDrivers.7z，28MB，覆盖 2728 个硬件 ID，含 Intel AX203/AX210/AX201 全系 1089 个、Realtek 8852BE、Qualcomm/Atheros 1611 个、MediaTek MT7920/7921），断网救急零下载零依赖本机。
-- 断网安装自动识别 Net 类 INF（兼容 UTF-16 编码 INF，Class= 任意空格对齐），实测 5 个 INF 识别 5 个、安装 4 成功 1 拒（本机已有更新版本）。
+- 断网安装自动识别 Net 类 INF（兼容 UTF-16 编码 INF，Class= 任意空格对齐），实测 5 个 INF 识别 5 个、安装 5 成功 0 失败（already exists 正确计为成功）。
+- 硬件扫描修复：pnputil /scan-devices 被拒时回退 CM_Reenumerate_DevNode 全树重枚举，不再对 WAN Miniport 等系统设备报 Access denied。
+- 安装完成后自动检测网卡设备状态：已工作/有问题/硬件不在位三种结论分别提示（含 M.2 插槽与 BIOS 检查建议）。
 - 本机驱动导出为救援包：DISM 导出全部第三方驱动打包 Drivers.7z（补充备份，菜单 4）。
 - 断网安装网卡驱动：解压救援包，自动识别 INF 的 Class=Net（网卡类）离线安装（无 Net 类时可选择全量安装），完成后扫描设备；网卡恢复在线后即可用 Windows Update 补齐全套驱动，回到在线模式。
 - 在线查询驱动库：连接 Windows Update 实时查询本机可用的驱动更新数量与标题清单。

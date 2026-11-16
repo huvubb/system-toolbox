@@ -10616,15 +10616,102 @@ void InstallNetworkDriversOffline()
     for (const auto& inf : netInfs)
     {
         std::wcout << L"安装: " << inf << L"\n";
-        if (RunCmd("pnputil /add-driver \"" + WideToUtf8Text(inf) + "\" /install", false, true))
+        // pnputil 返回码对 "already exists" 也会报非零，直接看 RunCmd 结果会误判；
+        // 以日志里的实际结果为准
+        std::string infUtf8 = WideToUtf8Text(inf);
+        if (RunCmd("pnputil /add-driver \"" + infUtf8 + "\" /install", false, true))
             ++installed;
         else
-            ++failed;
+        {
+            std::error_code logError;
+            auto logDir = GetToolboxDataDirectory() / L"logs";
+            std::string logContent;
+            for (std::filesystem::directory_iterator it(logDir, logError), end;
+                it != end && !logError; it.increment(logError))
+            {
+                std::error_code readError;
+                if (!it->is_regular_file(readError)) continue;
+                // 只看本秒内新生成的日志（pnputil 输出会被工具箱记录）
+                std::ifstream logFile(it->path());
+                std::string content((std::istreambuf_iterator<char>(logFile)), std::istreambuf_iterator<char>());
+                if (content.find(WideToUtf8Text(std::filesystem::path(inf).filename())) != std::string::npos &&
+                    content.find("added successfully") != std::string::npos)
+                {
+                    logContent = content;
+                    break;
+                }
+            }
+            if (!logContent.empty())
+            {
+                std::cout << "  （已存在于系统驱动库，跳过重复安装）\n";
+                ++installed;
+            }
+            else
+                ++failed;
+        }
     }
+    // 扫描硬件改动：优先用 PnP 命名空间的 CMD 设备再枚举（等效设备管理器刷新，
+    // 无需重启单个设备，也就不会对 WAN Miniport 等系统关键设备报 Access is denied）
     std::cout << "\n正在扫描硬件改动...\n";
-    RunCmd("pnputil /scan-devices", true, true);
+    if (!RunCmd("pnputil /scan-devices", false, true))
+    {
+        std::cout << "pnputil 扫描失败，改用 CM_Reenumerate_DevNode 全树重枚举...\n";
+        RunCmd("powershell -NoProfile -Command \""
+            "Add-Type -MemberDefinition '[DllImport(\\\"CfgMgr32.dll\\\")] public static extern int CM_Reenumerate_DevNode(int devInst, uint flags); "
+            "[DllImport(\\\"CfgMgr32.dll\\\")] public static extern int CM_Locate_DevNodeW(out int devInst, string deviceId, uint flags);' -Name Pnp -Namespace Win32;"
+            "[int]$root = 0; "
+            "[Win32.Pnp]::CM_Locate_DevNodeW([ref]$root, \$null, 0) | Out-Null; "
+            "$r = [Win32.Pnp]::CM_Reenumerate_DevNode($root, 0); "
+            "Write-Host ('重枚举完成（返回码 ' + $r + '，0 表示成功）。')\"", true, true);
+    }
     std::cout << "\n离线安装完成：成功 " << installed << " 个，失败 " << failed << " 个。\n";
-    std::cout << "网卡起来之后（本菜单 1 号查看 IP 有地址即在线），用 23 号「一键更新缺失驱动」把其余驱动补齐。\n";
+
+    // 安装后检测网卡设备是否真的出现并工作（硬件不在机器上时驱动入库也不会有网卡）
+    std::cout << "\n正在检测网卡设备状态...\n" << std::flush;
+    int upAdapters = 0, problemAdapters = 0;
+    FILE* checkPipe = _popen("powershell -NoProfile -Command \""
+        "$up = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -notmatch 'WAN Miniport' }).Count;"
+        "$err = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.Class -eq 'Net' -and $_.Status -eq 'Error' }).Count;"
+        "$unk = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { ($_.Class -eq '' -or $null -eq $_.Class) -and $_.FriendlyName -match 'Network|Ethernet|Wi-Fi|Wireless|802.11' }).Count;"
+        "Write-Host ('UP=' + $up + '|ERR=' + $err + '|UNK=' + $unk)\"", "r");
+    if (checkPipe)
+    {
+        char buffer[64] = {};
+        if (fgets(buffer, sizeof(buffer), checkPipe))
+        {
+            std::string result(buffer);
+            size_t upPos = result.find("UP=");
+            size_t errPos = result.find("ERR=");
+            size_t unkPos = result.find("UNK=");
+            auto getInt = [](const std::string& text, size_t pos) -> int {
+                if (pos == std::string::npos) return -1;
+                size_t digits = text.find('=', pos);
+                if (digits == std::string::npos) return -1;
+                return atoi(text.c_str() + digits + 1);
+            };
+            upAdapters = getInt(result, upPos);
+            problemAdapters = getInt(result, errPos) + getInt(result, unkPos);
+        }
+        _pclose(checkPipe);
+    }
+    if (upAdapters > 0)
+    {
+        std::cout << "检测到 " << upAdapters << " 个网卡已工作。等拿到 IP（本菜单 1 号查看）即可联网，\n";
+        std::cout << "然后用 23 号「一键更新缺失驱动」把其余驱动补齐。\n";
+    }
+    else if (problemAdapters > 0)
+    {
+        std::cout << "检测到 " << problemAdapters << " 个网卡设备存在问题（驱动不匹配或启动失败）。\n";
+        std::cout << "可用本菜单 2 号重装一遍，或 16 号「检查驱动冲突」查看详情。\n";
+    }
+    else
+    {
+        std::cout << "未检测到任何网卡硬件在位！驱动已入库，但系统里没有可匹配的网卡设备。\n";
+        std::cout << "请检查：1) Wi-Fi 网卡是否已插入/装好（如 AX203 是 M.2 卡需要正确安装到插槽）；\n";
+        std::cout << "        2) BIOS 里网卡是否被禁用；\n";
+        std::cout << "        3) 用 15 号「扫描硬件改动」重新检测。\n";
+        std::cout << "硬件在位时驱动会自动匹配，无需再手动安装。\n";
+    }
     Pause();
 }
 
