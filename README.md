@@ -162,13 +162,7 @@ Windows x64、Node.js 18+：执行 `npm install system-toolbox`，然后用 `npx
 
 #### MinGW-w64 编译命令
 ```bash
-# 可选：把 DLL 修复库（DirectXRepair.7z，约 90MB）嵌入主程序（推荐发布用）
-ld -b binary -r -o dxdata.o DirectXRepair.7z
-
-g++ -DSTB_EMBED_DXREPAIR -o system-toolbox.exe system-toolbox.cpp dxdata.o -std=c++17 -O2 -fexec-charset=UTF-8 -finput-charset=UTF-8 -lws2_32 -lshell32 -ladvapi32 -lole32 -lcrypt32 -lopengl32 -ld3d11 -ld3d12 -ldxgi -lgdi32 -luser32 -lwbemuuid -loleaut32 -lsetupapi -liphlpapi -pthread -static
-
-# 不嵌入修复库时（运行时从 EXE 目录或 drivers 目录读取 DirectXRepair.7z）：
-g++ -o system-toolbox.exe system-toolbox.cpp -std=c++17 -O2 -fexec-charset=UTF-8 -finput-charset=UTF-8 -lws2_32 -lshell32 -ladvapi32 -lole32 -lcrypt32 -lopengl32 -ld3d11 -ld3d12 -ldxgi -lgdi32 -luser32 -lwbemuuid -loleaut32 -lsetupapi -liphlpapi -pthread -static
+g++ -o system-toolbox.exe system-toolbox.cpp -std=c++17 -O2 -fexec-charset=UTF-8 -finput-charset=UTF-8 -lws2_32 -lshell32 -ladvapi32 -lole32 -lcrypt32 -lopengl32 -ld3d11 -ldxgi -lgdi32 -luser32 -lwbemuuid -loleaut32 -lsetupapi -liphlpapi -pthread -static
 ```
 
 在项目目录内运行，输出文件使用相对路径；部分 MinGW 链接器不支持包含中文的绝对输出路径。

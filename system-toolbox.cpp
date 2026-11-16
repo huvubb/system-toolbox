@@ -271,6 +271,8 @@ void Pause()
     if (GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &consoleMode))
         _getch();
     std::cout << std::endl;
+    // 按键后立即清屏：避免上一个操作的输出残留，让下一个操作从干净的界面开始
+    ClearScreen();
 }
 
 std::wstring ReadEnvironmentPath(HKEY root, const wchar_t* key)
@@ -4389,13 +4391,8 @@ void HardwareRealtimePanel()
         {
             for (const auto& entry : netSpeeds)
             {
-                int width = 20;
-                int filled = maxNetTotal > 0 ? static_cast<int>(width * (entry.in + entry.out) / maxNetTotal + 0.5) : 0;
-                if (filled > width) filled = width;
-                if (filled < 0) filled = 0;
                 std::cout << "  " << entry.name << "  ↓ " << FormatBytesPerSecond(entry.in)
-                          << " [" << std::string(filled, '|') << std::string(width - filled, '-') << "]  ↑ "
-                          << FormatBytesPerSecond(entry.out) << "\n";
+                          << "  ↑ " << FormatBytesPerSecond(entry.out) << "\n";
             }
         }
         else
@@ -4416,17 +4413,43 @@ void CpuEcFanMonitor()
     std::string driverPath;
     if (!Ring0FindDriverFile(driverPath))
     {
-        std::cout << "未找到 WinRing0x64.sys 内核驱动。本功能需要它读取 CPU MSR 温度与 EC 风扇转速。\n\n";
-        std::cout << "手动获取（任选其一）：\n";
-        std::cout << "  1. LibreHardwareMonitor 官方仓库驱动（v0.9.2 直链）：\n";
-        std::cout << "     https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/raw/v0.9.2/LibreHardwareMonitorLib/Resources/WinRing0x64.sys\n";
-        std::cout << "  2. 从已安装的 LibreHardwareMonitor / FanControl 软件目录提取 WinRing0x64.sys。\n\n";
-        std::cout << "下载后放到工具箱 EXE 同目录，或 drivers 目录：\n  "
-                  << PathToUtf8(GetToolboxDataDirectory() / L"drivers") << "\n\n";
-        std::cout << "注意：该驱动已被微软列入易受攻击驱动名单，部分杀软可能报毒；系统开启内存完整性\n";
-        std::cout << "（HVCI）时无法加载。是否使用由您自行判断，工具箱发行包不会捆绑该驱动。\n";
-        Pause();
-        return;
+        // 本地没有驱动文件：用 curl 自动从 LibreHardwareMonitor 官方仓库获取（SHA256 锁定校验）
+        const std::string kDriverUrl = "https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/raw/v0.9.2/LibreHardwareMonitorLib/Resources/WinRing0x64.sys";
+        const std::string kDriverSha256 = "11BD2C9F9E2397C9A16E0990E4ED2CF0679498FE0FD418A3DFDAC60B5C160EE5";
+        std::cout << "未找到 WinRing0x64.sys 内核驱动（CPU MSR 温度 / EC 风扇必需）。\n";
+        std::cout << "驱动来源: LibreHardwareMonitor v0.9.2 官方仓库（下载后校验 SHA256）。\n";
+        std::cout << "注意：该驱动已被微软列入易受攻击驱动名单，部分杀软可能报毒；系统开启内存完整性（HVCI）时无法加载。\n";
+        std::cout << "是否自动下载？(y/n): ";
+        char confirm;
+        std::cin >> confirm;
+        std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+        if (confirm != 'y' && confirm != 'Y') { Pause(); return; }
+        std::error_code mkError;
+        auto driverDir = GetToolboxDataDirectory() / L"drivers";
+        std::filesystem::create_directories(driverDir, mkError);
+        auto target = driverDir / L"WinRing0x64.sys";
+        if (DownloadWithCurlInsecure(kDriverUrl, PathToUtf8(target)))
+        {
+            std::string hash = GetFileSHA256(PathToUtf8(target));
+            if (hash == kDriverSha256)
+            {
+                std::cout << "驱动下载完成，SHA256 校验通过。\n";
+                driverPath = PathToUtf8(target);
+            }
+            else
+            {
+                std::cout << "SHA256 校验失败（期望 " << kDriverSha256 << "，实际 " << hash << "），已删除下载文件。\n";
+                std::filesystem::remove(target, mkError);
+                Pause();
+                return;
+            }
+        }
+        else
+        {
+            std::cout << "下载失败（检查网络），可手动放置 WinRing0x64.sys 到: " << PathToUtf8(driverDir) << "\n";
+            Pause();
+            return;
+        }
     }
     if (!Ring0Load())
     {
@@ -6924,10 +6947,12 @@ void NtdllApiMenu()
             continue;
         }
         
-        HMODULE hNtdll = LoadLibraryA("ntdll.dll");
+        // ntdll 在任何 Windows 进程中都必然已映射（进程加载器依赖它），
+        // 用 GetModuleHandleW 取句柄即可，不要 LoadLibrary（多余且增加引用计数）
+        HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
         if (!hNtdll)
         {
-            std::cout << "无法加载 ntdll.dll！" << std::endl;
+            std::cout << "无法获取 ntdll.dll 模块句柄（理论上不可能，请重启程序）！" << std::endl;
             Pause();
             continue;
         }
@@ -8075,6 +8100,97 @@ void NpmInstallMenu()
     }
 }
 
+// ==================== 应急断网与恢复 ====================
+
+// 一键断网：停止 DNS/网络服务，禁用全部物理与虚拟网卡（含 VPN TAP），清除活动连接。
+// 不修改防火墙规则与 IP 配置，恢复靠 29 号功能（重新启用适配器 + 重启网络服务）。
+void EmergencyNetworkShutdown()
+{
+    ClearScreen();
+    std::cout << "========== 一键断网 ==========\n";
+    std::cout << "将执行以下操作（防火墙规则与 IP 配置不变，可用「一键恢复网络」还原）：\n";
+    std::cout << "  1. 停止 DNS Client / Network Connections / DHCP 客户端服务\n";
+    std::cout << "  2. 禁用全部网络适配器（物理网卡、虚拟网卡、VPN/TAP 适配器）\n";
+    std::cout << "  3. 禁用蓝牙网络\n\n";
+    std::cout << "警告：所有 TCP/UDP 连接（含远程桌面、SSH、下载）会立即中断！\n";
+    std::cout << "如果本程序通过网络共享/远程方式运行，执行后将无法远程操作。\n";
+    std::cout << "输入 DISCONNECT 确认执行: ";
+    std::string confirm = GetInput("");
+    if (confirm != "DISCONNECT")
+    {
+        std::cout << "操作已取消。\n";
+        Pause();
+        return;
+    }
+
+    std::cout << "\n--- 停止网络服务 ---\n";
+    RunCmd("net stop dnscache /y >nul 2>&1", false, true);
+    RunCmd("net stop Netman /y >nul 2>&1", false, true);
+    RunCmd("net stop dhcp >nul 2>&1", false, true);
+    RunCmd("net stop NlaSvc >nul 2>&1", false, true);
+    std::cout << "服务已停止。\n";
+
+    std::cout << "\n--- 禁用全部网络适配器 ---\n";
+    RunCmd("powershell -NoProfile -Command \""
+        "Get-NetAdapter | ForEach-Object { Write-Host ('禁用: ' + $_.Name + ' (' + $_.InterfaceDescription + ')'); Disable-NetAdapter -Name $_.Name -Confirm:\\$false };"
+        "if (-not (Get-NetAdapter * | Where-Object Status -eq 'Disabled')) { Write-Host '没有需要禁用的适配器' }\"", true, true);
+    // 蓝牙 PAN 与 Wwan（移动网络）单独处理
+    RunCmd("net stop bthserv >nul 2>&1", false, true);
+    RunCmd("net stop WwanSvc >nul 2>&1", false, true);
+
+    std::cout << "\n--- 断网完成 ---\n";
+    int remaining = 0;
+    FILE* pipe = _popen("powershell -NoProfile -Command \"(Get-NetAdapter | Where-Object Status -eq 'Up').Count\"", "r");
+    if (pipe)
+    {
+        char buffer[32] = {};
+        if (fgets(buffer, sizeof(buffer), pipe)) remaining = atoi(buffer);
+        _pclose(pipe);
+    }
+    if (remaining > 0)
+        std::cout << "仍有 " << remaining << " 个适配器在线（可能是被策略保护的适配器，可用 20 号功能查看后手动禁用）。\n";
+    else
+        std::cout << "全部适配器已禁用，所有 TCP/UDP/VPN 连接已断开。\n";
+    std::cout << "恢复网络请使用本菜单 29 号「一键恢复网络」。\n";
+    Pause();
+}
+
+// 一键恢复网络：重新启用全部适配器，启动网络服务，重置 DNS/DHCP 为自动获取
+void EmergencyNetworkRestore()
+{
+    ClearScreen();
+    std::cout << "========== 一键恢复网络 ==========\n";
+    std::cout << "将重新启用全部网络适配器并恢复网络服务。\n\n";
+    std::cout << "是否继续？(y/n): ";
+    char confirm;
+    std::cin >> confirm;
+    std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+    if (confirm != 'y' && confirm != 'Y') { Pause(); return; }
+
+    std::cout << "\n--- 启用全部网络适配器 ---\n";
+    RunCmd("powershell -NoProfile -Command \""
+        "Get-NetAdapter | ForEach-Object { Write-Host ('启用: ' + $_.Name); Enable-NetAdapter -Name $_.Name -Confirm:\\$false }\"", true, true);
+
+    std::cout << "\n--- 启动网络服务 ---\n";
+    RunCmd("net start dhcp >nul 2>&1", false, true);
+    RunCmd("net start NlaSvc >nul 2>&1", false, true);
+    RunCmd("net start dnscache >nul 2>&1", false, true);
+    RunCmd("net start Netman >nul 2>&1", false, true);
+    RunCmd("net start bthserv >nul 2>&1", false, true);
+    RunCmd("net start WwanSvc >nul 2>&1", false, true);
+    std::cout << "服务已启动。\n";
+
+    std::cout << "\n--- 刷新网络配置 ---\n";
+    RunCmd("ipconfig /renew >nul 2>&1", false, true);
+    RunCmd("ipconfig /flushdns >nul 2>&1", false, true);
+
+    // 验证连通性
+    std::cout << "\n--- 连通性验证 ---\n";
+    RunCmd("ping -n 2 223.5.5.5", true, true);
+    std::cout << "\n网络恢复流程完成。VPN 需要重新手动连接（VPN 客户端会自动重连 TAP 适配器）。\n";
+    Pause();
+}
+
 // ==================== 网络操作工具 ====================
 
 // 网络操作菜单
@@ -8115,11 +8231,13 @@ void NetworkToolsMenu()
         std::cout << "25. 下载文件（fastdl 高速下载）\n";
         std::cout << "26. 测试网速（speedtest）\n";
         std::cout << "27. 查看外网 IP\n";
+        std::cout << "\n=== 应急断网 ===\n";
+        std::cout << "28. 一键断网（丢弃全部 TCP/UDP/VPN 连接）\n";
+        std::cout << "29. 一键恢复网络（重置为自动获取并启用适配器）\n";
         std::cout << "\n 0. 返回主菜单\n";
         std::cout << "==================================\n";
-        
         int choice = GetIntInput("请选择: ");
-        
+
         if (choice == 0) break;
         
         switch (choice)
@@ -8368,7 +8486,15 @@ void NetworkToolsMenu()
                 std::cout << "\n";
                 Pause();
                 break;
-                
+
+            case 28:
+                EmergencyNetworkShutdown();
+                break;
+
+            case 29:
+                EmergencyNetworkRestore();
+                break;
+
             default:
                 std::cout << "无效选项。" << std::endl;
                 Pause();
@@ -10352,6 +10478,227 @@ void HardwareOverview()
     Pause();
 }
 
+// ==================== 网卡驱动救援包 ====================
+std::string FindSevenZip();
+bool RunProcessArguments(const std::vector<std::wstring>& arguments, bool background);
+// 断网救急：提前把常见网卡驱动（或本机驱动）打包为 Drivers.7z，
+// 断网后解压并用 pnputil 离线安装网卡驱动，恢复在线后再用 Windows Update 补齐全套。
+
+// 定位救援包 Drivers.7z（EXE 目录 → 数据目录 drivers）
+std::string FindDriversArchive()
+{
+    wchar_t exePath[32768] = L"";
+    GetModuleFileNameW(nullptr, exePath, 32768);
+    std::error_code error;
+    std::vector<std::filesystem::path> candidates = {
+        std::filesystem::path(exePath).parent_path() / L"Drivers.7z",
+        GetToolboxDataDirectory() / L"drivers" / L"Drivers.7z"
+    };
+    for (const auto& candidate : candidates)
+        if (std::filesystem::is_regular_file(candidate, error)) return PathToUtf8(candidate);
+    return "";
+}
+
+// 本机驱动导出为救援包：DISM 导出全部第三方驱动 → 打包 Drivers.7z
+void ExportLocalDriverPack()
+{
+    ClearScreen();
+    std::cout << "========== 本机驱动导出为救援包 ==========\n";
+    std::cout << "用 DISM 导出本机全部第三方驱动（含网卡），打包为 Drivers.7z。\n";
+    std::cout << "建议在系统健康、联网正常时做一次，断网/重装后可离线恢复网卡。\n\n";
+    auto packDir = GetToolboxDataDirectory() / L"driverpack";
+    std::error_code error;
+    std::filesystem::create_directories(packDir, error);
+    std::cout << "正在导出本机驱动（驱动多时需要几分钟）...\n\n";
+    RunCmd("dism /online /export-driver /destination:\"" + PathToUtf8(packDir) + "\"");
+    std::error_code countError;
+    int infCount = 0;
+    for (std::filesystem::recursive_directory_iterator it(packDir, countError), end;
+        it != end && !countError; it.increment(countError))
+        if (it->is_regular_file() && ToLowerAscii(PathToUtf8(it->path().extension())) == ".inf") ++infCount;
+    if (infCount == 0)
+    {
+        std::cout << "\n没有导出任何 INF，无法打包。\n";
+        Pause();
+        return;
+    }
+    std::string sevenZip = FindSevenZip();
+    if (sevenZip.empty())
+    {
+        std::cout << "\n已导出 " << infCount << " 个 INF 到 " << PathToUtf8(packDir)
+                  << "，但未找到 7z.exe，无法打包。请安装 7-Zip 后重试（导出内容已保留）。\n";
+        Pause();
+        return;
+    }
+    auto archivePath = GetToolboxDataDirectory() / L"drivers" / L"Drivers.7z";
+    std::filesystem::create_directories(archivePath.parent_path(), error);
+    std::cout << "\n正在打包 " << infCount << " 个 INF 为 Drivers.7z...\n" << std::flush;
+    bool packed = RunProcessArguments({
+        std::filesystem::u8path(sevenZip).wstring(), L"a",
+        std::filesystem::path(archivePath),
+        std::filesystem::path(packDir.wstring() + L"\\*"), L"-y"}, false);
+    if (packed)
+        std::cout << "救援包已生成: " << PathToUtf8(archivePath)
+                  << "（建议复制到 U 盘或 EXE 目录，断网救急用）\n";
+    else
+        std::cout << "打包失败，导出的驱动已保留在 " << PathToUtf8(packDir) << "\n";
+    Pause();
+}
+
+// 断网装网卡驱动：解压救援包，只挑网络类 INF（Net 类）pnputil 离线安装
+void InstallNetworkDriversOffline()
+{
+    ClearScreen();
+    std::cout << "========== 断网安装网卡驱动（救援包） ==========\n\n";
+    std::string archivePath = FindDriversArchive();
+    if (archivePath.empty())
+    {
+        std::cout << "未找到救援包 Drivers.7z。\n\n";
+        std::cout << "三种获取方式：\n";
+        std::cout << "  1. 现在还能联网？先用本菜单 2 号「本机驱动导出为救援包」做一份（推荐）。\n";
+        std::cout << "  2. 在别的电脑上用本工具箱导出，或从常见网卡驱动包整理，放到 EXE 目录。\n";
+        std::cout << "  3. 包内容：任意文件夹结构，包含网卡驱动的 INF 即可（自动识别 Net 类）。\n";
+        Pause();
+        return;
+    }
+    std::string sevenZip = FindSevenZip();
+    if (sevenZip.empty())
+    {
+        std::cout << "未找到 7z.exe。请安装 7-Zip，或把 7z.exe 放到工具箱 EXE 同目录。\n";
+        Pause();
+        return;
+    }
+    auto outDir = GetToolboxDataDirectory() / L"driverpack-extract";
+    std::error_code error;
+    std::filesystem::create_directories(outDir, error);
+    std::cout << "救援包: " << archivePath << "\n";
+    std::cout << "正在解压...\n" << std::flush;
+    if (!RunProcessArguments({
+        std::filesystem::u8path(sevenZip).wstring(), L"x",
+        std::filesystem::u8path(archivePath).wstring(),
+        L"-o" + outDir.wstring(), L"-y"}, false))
+    {
+        std::cout << "解压失败。\n";
+        Pause();
+        return;
+    }
+    std::cout << "解压完成。\n\n";
+
+    std::cout << "正在识别网络类驱动（INF 的 Class=Net）...\n" << std::flush;
+    std::vector<std::wstring> netInfs, allInfs;
+    std::error_code walkError;
+    for (std::filesystem::recursive_directory_iterator it(outDir, walkError), end;
+        it != end && !walkError; it.increment(walkError))
+    {
+        if (walkError) break;
+        if (!it->is_regular_file() || ToLowerAscii(PathToUtf8(it->path().extension())) != ".inf") continue;
+        allInfs.push_back(it->path().wstring());
+        // 读 INF 判断类：Class=Net（网卡）
+        std::ifstream infFile(std::filesystem::path(it->path()));
+        std::string line;
+        bool isNet = false;
+        int linesChecked = 0;
+        while (std::getline(infFile, line) && linesChecked < 120 && !isNet)
+        {
+            ++linesChecked;
+            std::string lower = ToLowerAscii(line);
+            if (lower.rfind("class=", 0) == 0 || lower.find("class = ") == 0 || lower.find("class=") != std::string::npos)
+            {
+                if (lower.find("net") != std::string::npos && lower.find("netclient") == std::string::npos)
+                    isNet = true;
+            }
+        }
+        if (isNet) netInfs.push_back(it->path().wstring());
+    }
+
+    if (netInfs.empty())
+    {
+        std::cout << "救援包内未识别到网卡类驱动（共 " << allInfs.size() << " 个 INF）。\n";
+        std::cout << "是否把全部 INF 都装一遍（pnputil 只会加载匹配硬件的驱动，安全但较慢）？(y/n): ";
+        char confirm;
+        std::cin >> confirm;
+        std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+        if (confirm == 'y' || confirm == 'Y') netInfs = allInfs;
+        else { Pause(); return; }
+    }
+    else
+        std::cout << "识别到 " << netInfs.size() << " 个网卡类 INF（共 " << allInfs.size() << " 个）。\n\n";
+
+    int installed = 0, failed = 0;
+    for (const auto& inf : netInfs)
+    {
+        std::wcout << L"安装: " << inf << L"\n";
+        if (RunCmd("pnputil /add-driver \"" + WideToUtf8Text(inf) + "\" /install", false, true))
+            ++installed;
+        else
+            ++failed;
+    }
+    std::cout << "\n正在扫描硬件改动...\n";
+    RunCmd("pnputil /scan-devices", true, true);
+    std::cout << "\n离线安装完成：成功 " << installed << " 个，失败 " << failed << " 个。\n";
+    std::cout << "网卡起来之后（本菜单 1 号查看 IP 有地址即在线），用 23 号「一键更新缺失驱动」把其余驱动补齐。\n";
+    Pause();
+}
+
+// 在线查询微软驱动库（Windows Update 当前为本机提供的驱动更新数量）
+void QueryDriverLibraryOnline()
+{
+    ClearScreen();
+    std::cout << "========== 在线查询驱动库 ==========\n";
+    if (!g_bOnlineMode)
+    {
+        std::cout << "当前为离线模式，无法查询在线驱动库。\n";
+        Pause();
+        return;
+    }
+    std::cout << "正在连接 Windows Update 查询本机可用的驱动更新数量（可能需要 1-3 分钟）...\n" << std::flush;
+    char tempDir[MAX_PATH];
+    DWORD tempLen = GetTempPathA(MAX_PATH, tempDir);
+    if (!tempLen || tempLen >= MAX_PATH) { std::cout << "无法获取临时目录。\n"; Pause(); return; }
+    std::string scriptPath = std::string(tempDir) + "stb_drvcount.ps1";
+    std::ofstream script(std::filesystem::u8path(scriptPath), std::ios::binary);
+    if (!script.is_open()) { std::cout << "无法创建临时脚本。\n"; Pause(); return; }
+    script << "\xEF\xBB\xBF";
+    script << "$ErrorActionPreference = 'Stop'\n";
+    script << "try {\n";
+    script << "    $session = New-Object -ComObject Microsoft.Update.Session\n";
+    script << "    $searcher = $session.CreateUpdateSearcher()\n";
+    script << "    $result = $searcher.Search(\"IsInstalled=0 and Type='Driver'\")\n";
+    script << "    Write-Host ('本机可用的驱动更新数量: ' + $result.Updates.Count)\n";
+    script << "    for ($i = 0; $i -lt $result.Updates.Count; $i++) { Write-Host ('  [' + ($i+1) + '] ' + $result.Updates.Item($i).Title) }\n";
+    script << "    if ($result.Updates.Count -gt 0) { Write-Host '可用主菜单 23 号一键安装。' }\n";
+    script << "} catch {\n";
+    script << "    Write-Host ('查询失败: ' + $_.Exception.Message)\n";
+    script << "}\n";
+    script.close();
+    RunPowerShellFile(scriptPath, {}, false);
+    std::error_code removeError;
+    std::filesystem::remove(std::filesystem::u8path(scriptPath), removeError);
+    Pause();
+}
+
+// 网卡驱动救援包菜单
+void NetworkDriverRescueMenu()
+{
+    while (true)
+    {
+        ClearScreen();
+        std::cout << "========== 网卡驱动救援包 ==========\n";
+        std::cout << "断网救急三步：提前备包 → 断网装网卡驱动 → 回在线补齐全套。\n\n";
+        std::cout << " 1. 本机驱动导出为救援包（联网时做一次备份，含全部第三方驱动）\n";
+        std::cout << " 2. 断网安装网卡驱动（解压救援包，自动识别 Net 类 INF 离线安装）\n";
+        std::cout << " 3. 在线查询驱动库（Windows Update 当前为本机提供的驱动数量与清单）\n";
+        std::cout << " 0. 返回上级\n";
+        std::cout << "====================================\n";
+        int choice = GetIntInput("请选择: ");
+        if (choice == 0) break;
+        else if (choice == 1) ExportLocalDriverPack();
+        else if (choice == 2) InstallNetworkDriversOffline();
+        else if (choice == 3) QueryDriverLibraryOnline();
+        else { std::cout << "无效选项。" << std::endl; Pause(); }
+    }
+}
+
 // 注入驱动到离线系统目录（DISM /Add-Driver，适用于部署的系统、挂载的 WIM、WinPE）
 std::string UnquotePath(std::string path);
 void InjectDriversOffline()
@@ -10488,6 +10835,7 @@ void DriverToolsMenu()
         std::cout << "21. 导出驱动列表到文件\n";
         std::cout << "22. 注入驱动到离线系统目录（DISM）\n";
         std::cout << "23. 一键更新缺失驱动（Windows Update 自动匹配）\n";
+        std::cout << "24. 网卡驱动救援包（下载集成/本机导出/断网装网卡驱动）\n";
         std::cout << "\n 0. 返回主菜单\n";
         std::cout << "==============================\n";
 
@@ -10651,6 +10999,9 @@ void DriverToolsMenu()
                 break;
             case 23:
                 AutoInstallMissingDrivers();
+                break;
+            case 24:
+                NetworkDriverRescueMenu();
                 break;
             default:
                 std::cout << "无效选项。" << std::endl;
@@ -16063,36 +16414,103 @@ void DllRepositoryRepair()
     while (true)
     {
         std::cout << "修复方式：\n"
-                  << " 1. 按文件名修复（输入缺失的 DLL 文件名）\n"
-                  << " 2. 全量修复（安装库内全部 DLL 到系统目录）\n"
+                  << " 1. 缺啥补啥（无需记名称：扫描系统缺的旧版 DirectX/VC++ 组件并自动补齐）\n"
+                  << " 2. 全量修复（安装库内全部 DLL 到系统目录，已有文件自动备份）\n"
+                  << " 3. 粘贴报错修复（把弹窗里的文件名/整段报错粘进来，自动识别）\n"
                   << " 0. 返回\n";
         int choice = GetIntInput("请选择: ");
         if (choice == 0 || !std::cin) return;
-        if (choice == 1)
+        if (choice == 3)
         {
-            std::string name = UnquotePath(GetInput("DLL 文件名（如 d3dx9_43.dll，输入 q 返回）: "));
-            if (name.empty() || name == "q" || name == "Q") continue;
-            auto matches = FindFileInTree(outDir, ToLowerAscii(name));
-            if (matches.empty())
+            std::cout << "把报错内容粘贴进来（可多行，直接包含 d3dx9_43.dll 这类文件名），输入单独一行 END 结束：\n";
+            std::string line, blob;
+            while (std::getline(std::cin, line) && line != "END" && line != "end") blob += line + "\n";
+            if (blob.empty()) { std::cout << "没有输入内容。\n"; continue; }
+            // 从粘贴文本中提取所有 *.dll 文件名，逐一与修复库匹配
+            std::vector<std::string> names;
+            size_t pos = 0;
+            while (pos < blob.size())
             {
-                std::cout << "修复库中没有这个文件。\n";
+                size_t dot = blob.find('.', pos);
+                if (dot == std::string::npos) break;
+                // 向前找文件名主体（字母数字下划线连字符），向后匹配 dll 后缀
+                size_t begin = dot;
+                while (begin > 0 && (isalnum(static_cast<unsigned char>(blob[begin - 1])) || blob[begin - 1] == '_' || blob[begin - 1] == '-')) --begin;
+                size_t end = dot + 1;
+                while (end < blob.size() && isalnum(static_cast<unsigned char>(blob[end]))) ++end;
+                std::string token = blob.substr(begin, end - begin);
+                std::string tokenLower = ToLowerAscii(token);
+                if (tokenLower.size() > 4 && tokenLower.compare(tokenLower.size() - 4, 4, ".dll") == 0
+                    && std::find(names.begin(), names.end(), tokenLower) == names.end())
+                    names.push_back(tokenLower);
+                pos = end;
+            }
+            if (names.empty())
+            {
+                std::cout << "没从报错内容里识别到 *.dll 文件名。\n";
                 continue;
             }
-            int installed = 0;
-            for (const auto& match : matches)
-                if (InstallRepairDll(match)) ++installed;
-            std::cout << "完成：匹配 " << matches.size() << " 个文件，安装 " << installed
-                      << " 个。建议重新运行需要该 DLL 的程序验证。\n";
+            std::cout << "识别到 " << names.size() << " 个 DLL：\n";
+            int repairedCount = 0, missing = 0;
+            for (const auto& name : names)
+            {
+                auto matches = FindFileInTree(outDir, name);
+                if (matches.empty()) { std::cout << "  " << name << ": 修复库中没有\n"; ++missing; continue; }
+                int ok = 0;
+                for (const auto& match : matches)
+                    if (InstallRepairDll(match)) ++ok;
+                std::cout << "  " << name << ": 匹配 " << matches.size() << " 个，安装 " << ok << " 个\n";
+                if (ok > 0) ++repairedCount;
+            }
+            std::cout << "\n修复完成：" << repairedCount << " 个已装，" << missing << " 个不在库内"
+                      << "（不在库内的多为 VC++ 运行库或系统组件，可用主菜单 5 / 本菜单 2、3 处理）。\n";
+            Pause();
+            continue;
+        }
+        if (choice == 1)
+        {
+            // 缺啥补啥：扫描系统目录，凡库内存在而系统缺失的同名 DLL 一律补齐
+            std::cout << "正在扫描系统缺失的组件（对照修复库清单）...\n" << std::flush;
+            wchar_t windows[MAX_PATH] = L"";
+            GetWindowsDirectoryW(windows, MAX_PATH);
+            std::filesystem::path sys64 = std::filesystem::path(windows) / L"System32";
+            std::filesystem::path sys32 = std::filesystem::path(windows) / L"SysWOW64";
+            int total = 0, repaired = 0;
+            std::error_code walkError;
+            for (std::filesystem::recursive_directory_iterator it(outDir, walkError), end;
+                it != end && !walkError; it.increment(walkError))
+            {
+                if (walkError) break;
+                if (!it->is_regular_file()) continue;
+                std::string fileName = PathToUtf8(it->path().filename());
+                if (ToLowerAscii(fileName).find(".dll") == std::string::npos) continue;
+                ++total;
+                int bits = PeMachineBits(it->path().wstring());
+                std::filesystem::path checkDir = bits == 64 ? sys64 : sys32;
+                // xinput 等组件只装 64 位即可（32 位程序会通过系统重定向找 32 位库，仍以库内双份为准）
+                if (!std::filesystem::is_regular_file(checkDir / it->path().filename(), walkError))
+                {
+                    std::cout << "缺失: " << fileName << "（" << (bits == 64 ? "64" : "32") << " 位）→ 补齐 ";
+                    if (InstallRepairDll(it->path().wstring())) ++repaired;
+                }
+            }
+            std::cout << "\n缺啥补啥完成：对照 " << total << " 个库内组件，补齐缺失 " << repaired << " 个。\n";
+            std::cout << "系统里已有同名文件不会被覆盖（避免破坏现有组件版本）。\n";
+            Pause();
         }
         else if (choice == 2)
         {
-            std::cout << "将把修复库内全部 DLL 安装到 System32 / SysWOW64（已有文件自动备份为 .stb-bak）。\n";
+            std::cout << "将对照修复库清单补齐系统缺失的 DLL：System32 / SysWOW64 里已有的文件一律不替换。\n";
             std::cout << "是否继续？(y/n): ";
             char confirm;
             std::cin >> confirm;
             std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
             if (confirm != 'y' && confirm != 'Y') continue;
-            int total = 0, installed = 0;
+            wchar_t windows[MAX_PATH] = L"";
+            GetWindowsDirectoryW(windows, MAX_PATH);
+            std::filesystem::path sys64 = std::filesystem::path(windows) / L"System32";
+            std::filesystem::path sys32 = std::filesystem::path(windows) / L"SysWOW64";
+            int total = 0, installed = 0, skipped = 0;
             std::error_code walkError;
             for (std::filesystem::recursive_directory_iterator it(outDir, walkError), end;
                 it != end && !walkError; it.increment(walkError))
@@ -16100,9 +16518,18 @@ void DllRepositoryRepair()
                 if (walkError) break;
                 if (!it->is_regular_file() || ToLowerAscii(PathToUtf8(it->path().extension())).find(".dll") == std::string::npos) continue;
                 ++total;
+                int bits = PeMachineBits(it->path().wstring());
+                std::filesystem::path checkDir = bits == 64 ? sys64 : sys32;
+                std::error_code checkError;
+                if (std::filesystem::is_regular_file(checkDir / it->path().filename(), checkError))
+                {
+                    ++skipped; // 系统已有：不替换
+                    continue;
+                }
                 if (InstallRepairDll(it->path().wstring())) ++installed;
             }
-            std::cout << "全量修复完成：共 " << total << " 个 DLL，安装 " << installed << " 个。\n";
+            std::cout << "\n补齐完成：库内 " << total << " 个 DLL，系统已有跳过 " << skipped
+                      << " 个，新装 " << installed << " 个。\n";
         }
     }
 }
