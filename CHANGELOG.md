@@ -1,5 +1,34 @@
 # 更新日志
 
+## npm 1.16.1 — 2026-11-16
+
+### Linux 格式化无 WSL 修复
+
+- 明确提示挂物理盘必须 WSL2（WSL1 不支持 wsl --mount），引导 wsl --install -d Ubuntu。
+- 修复 mkfs 工具链检测：wsl 无发行版时退出码仍为 0，改为输出标记文本校验（MKFS_TOOL_PRESENT），实测引导路径正确触发。
+
+## npm 1.16.0 — 2026-11-16
+
+### Linux 文件系统格式化（磁盘工具 → 15）
+
+- 格式化分区新增 Linux 全系列：ext2/ext3/ext4、XFS、Btrfs、F2FS、exFAT（exfatprogs）、swap——经 WSL 发行版内 mkfs 对物理分区执行（wsl --mount --bare 挂盘 → mkfs → 卸载）。
+- WSL 内目标设备按磁盘号映射 /dev/sdXN，执行前显示映射结果并二次确认。
+
+## npm 1.15.3 — 2026-11-16
+
+### 磁盘格式化文件系统扩展（磁盘工具 → 15）
+
+- 格式化分区支持全部主流文件系统：NTFS、exFAT、FAT32、FAT16、FAT12、ReFS（diskpart 原生格式化）。
+- 新增 Apple 文件系统预设：HFS+ 与 APFS——Windows 没有原生格式化器，本操作将分区类型 GUID 设为 Apple 标准（HFS+ 48465300-…/APFS 7C3457EF-…）并提示到 macOS 磁盘工具执行抹掉。
+- 临时 diskpart 脚本改存 %TEMP%。
+
+## npm 1.15.2 — 2026-11-16
+
+### 内嵌 Intel Wi-Fi 驱动升级 24.80.0.2（修复 AX203 首装不工作）
+
+- 24.70.0.3 对 AX203（DEV_51F1/7740）支持不全，无驱动状态首装后网卡不工作。
+- 从本机 DriverStore 提取 Intel 官方签名且实测驱动 AX203 成功的 24.80.0.2 替换，NetDrivers.7z 更新为 23MB。
+
 ## npm 1.14.0 — 2026-11-16
 
 ### 应急断网（网络工具 → 28/29）
