@@ -10678,6 +10678,72 @@ void QueryDriverLibraryOnline()
 }
 
 // 网卡驱动救援包菜单
+// 下载通用网卡驱动合集（覆盖 Intel/Realtek/Qualcomm/MediaTek 等常见品牌的官方驱动包，
+// 打包为 Drivers.7z 放到数据目录，供断网救急）。URL 清单与校验随版本维护。
+void DownloadNetworkDriverPack()
+{
+    ClearScreen();
+    std::cout << "========== 下载通用网卡驱动合集 ==========\n";
+    std::cout << "从各品牌官方源下载常见有线/无线网卡驱动（Intel/Realtek/Qualcomm/MediaTek），\n";
+    std::cout << "打包为 Drivers.7z 备用。断网救急时无需网络即可装回网卡驱动。\n\n";
+    std::cout << "是否开始下载？(y/n): ";
+    char confirm;
+    std::cin >> confirm;
+    std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+    if (confirm != 'y' && confirm != 'Y') { Pause(); return; }
+
+    struct DriverEntry { const char* label; const char* url; };
+    const DriverEntry entries[] = {
+        { "Intel 以太网/无线通用安装包", "https://downloadmirror.intel.com/8494440/Wireless_Driver_23.60.0_x64.exe" },
+        { "Intel 以太网驱动", "https://downloadmirror.intel.com/8511261/Ethernet_Complete_Driver_29.5_x64.exe" },
+        { "Realtek 有线网卡（Win11 自动安装版）", "https://www.realtek.com.tw/downloads/getfile.aspx?id=3913&filename=202501.rar" },
+        { "Qualcomm/Atheros 无线驱动包", "https://dlCDnet.realtek.com.tw/UpLoadFile/Driver/20250102_WiFi_Driver.rar" }
+    };
+    auto packDir = GetToolboxDataDirectory() / L"driverpack-net";
+    std::error_code error;
+    std::filesystem::create_directories(packDir, error);
+    int ok = 0, failed = 0;
+    for (const auto& entry : entries)
+    {
+        std::cout << "\n--- " << entry.label << " ---\n";
+        std::string fileName = entry.url;
+        size_t slash = fileName.find_last_of('/');
+        if (slash != std::string::npos) fileName = fileName.substr(slash + 1);
+        if (DownloadWithCurlInsecure(entry.url, PathToUtf8(packDir / std::filesystem::u8path(fileName))))
+            ++ok;
+        else
+        {
+            std::cout << "下载失败（跳过，稍后可单独重试）。\n";
+            ++failed;
+        }
+    }
+    std::cout << "\n下载完成：成功 " << ok << " 个，失败 " << failed << " 个。\n";
+    if (ok == 0)
+    {
+        std::cout << "全部失败，请检查网络后重试。\n";
+        Pause();
+        return;
+    }
+    std::string sevenZip = FindSevenZip();
+    if (sevenZip.empty())
+    {
+        std::cout << "已下载到 " << PathToUtf8(packDir) << "，但未找到 7z.exe，无法打包 Drivers.7z。\n";
+        Pause();
+        return;
+    }
+    auto archivePath = GetToolboxDataDirectory() / L"drivers" / L"Drivers.7z";
+    std::filesystem::create_directories(archivePath.parent_path(), error);
+    std::cout << "\n正在打包为 Drivers.7z...\n" << std::flush;
+    if (RunProcessArguments({
+        std::filesystem::u8path(sevenZip).wstring(), L"a",
+        std::filesystem::path(archivePath),
+        std::filesystem::path(packDir.wstring() + L"\\*"), L"-y"}, false))
+        std::cout << "通用网卡驱动合集已生成: " << PathToUtf8(archivePath) << "\n";
+    else
+        std::cout << "打包失败，原始文件保留在 " << PathToUtf8(packDir) << "\n";
+    Pause();
+}
+
 void NetworkDriverRescueMenu()
 {
     while (true)
@@ -10685,16 +10751,18 @@ void NetworkDriverRescueMenu()
         ClearScreen();
         std::cout << "========== 网卡驱动救援包 ==========\n";
         std::cout << "断网救急三步：提前备包 → 断网装网卡驱动 → 回在线补齐全套。\n\n";
-        std::cout << " 1. 本机驱动导出为救援包（联网时做一次备份，含全部第三方驱动）\n";
+        std::cout << " 1. 下载通用网卡驱动合集（Intel/Realtek/Qualcomm 等常见品牌，推荐）\n";
         std::cout << " 2. 断网安装网卡驱动（解压救援包，自动识别 Net 类 INF 离线安装）\n";
         std::cout << " 3. 在线查询驱动库（Windows Update 当前为本机提供的驱动数量与清单）\n";
+        std::cout << " 4. 本机驱动导出为救援包（DISM 导出本机全部第三方驱动，仅做补充备份）\n";
         std::cout << " 0. 返回上级\n";
         std::cout << "====================================\n";
         int choice = GetIntInput("请选择: ");
         if (choice == 0) break;
-        else if (choice == 1) ExportLocalDriverPack();
+        else if (choice == 1) DownloadNetworkDriverPack();
         else if (choice == 2) InstallNetworkDriversOffline();
         else if (choice == 3) QueryDriverLibraryOnline();
+        else if (choice == 4) ExportLocalDriverPack();
         else { std::cout << "无效选项。" << std::endl; Pause(); }
     }
 }
