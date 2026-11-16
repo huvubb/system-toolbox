@@ -8768,24 +8768,63 @@ void DiskToolsMenu()
             {
                 int diskNum = GetIntInput("请输入磁盘号: ");
                 int partNum = GetIntInput("请输入分区号: ");
-                std::string fs = GetInput("请输入文件系统（NTFS/FAT32/exFAT）: ");
-                if (diskNum >= 0 && partNum >= 0 && !fs.empty())
+                std::cout << "文件系统选择：\n";
+                std::cout << " 1. NTFS（Windows 标准日志文件系统）\n";
+                std::cout << " 2. exFAT（大容量 U 盘/SD 卡，Windows/macOS 均可读写）\n";
+                std::cout << " 3. FAT32（兼容性最好，单文件上限 4GB）\n";
+                std::cout << " 4. FAT16（小容量存储卡/嵌入式设备）\n";
+                std::cout << " 5. FAT12（极小容量软盘级存储）\n";
+                std::cout << " 6. HFS+（macOS 文件系统；Windows 无法写入其内部结构）\n";
+                std::cout << " 7. APFS（Apple 新一代文件系统；Windows 原生不可读写）\n";
+                std::cout << " 8. ReFS（Windows 弹性文件系统，需系统版本支持）\n";
+                std::cout << " 0. 取消\n";
+                int fsChoice = GetIntInput("请选择: ");
+                std::string fs;
+                bool appleFs = false;
+                std::string guid;
+                switch (fsChoice)
                 {
-                    std::cout << "警告：将格式化磁盘 " << diskNum << " 的分区 " << partNum << "！\n";
-                    std::cout << "是否继续？(y/n): ";
-                    char c;
-                    std::cin >> c;
-                    std::cin.ignore();
-                    if (c == 'y' || c == 'Y')
-                    {
-                        std::string script = "select disk " + std::to_string(diskNum) + "\nselect partition " + std::to_string(partNum) + "\nformat fs=" + fs + " quick\nexit\n";
-                        std::ofstream scriptFile("C:\\diskpart_script.txt");
-                        scriptFile << script;
-                        scriptFile.close();
-                        RunCmd("diskpart /s C:\\diskpart_script.txt");
-                        DeleteFileA("C:\\diskpart_script.txt");
-                    }
+                    case 1: fs = "NTFS"; break;
+                    case 2: fs = "exFAT"; break;
+                    case 3: fs = "FAT32"; break;
+                    case 4: fs = "FAT16"; break;
+                    case 5: fs = "FAT12"; break;
+                    case 6: fs = "HFS+"; appleFs = true; guid = "48465300-0000-11AA-AA11-00306543ECAC"; break;
+                    case 7: fs = "APFS"; appleFs = true; guid = "7C3457EF-0000-11AA-AA11-00306543ECAC"; break;
+                    case 8: fs = "ReFS"; break;
+                    default: std::cout << "操作已取消。\n"; Pause(); break;
                 }
+                if (fsChoice <= 0 || fsChoice > 8) break;
+                if (diskNum < 0 || partNum < 0)
+                {
+                    std::cout << "磁盘号/分区号无效！\n";
+                    Pause();
+                    break;
+                }
+                std::cout << "警告：将格式化磁盘 " << diskNum << " 的分区 " << partNum << " 为 " << fs << "！\n";
+                if (appleFs)
+                    std::cout << "说明：Windows 没有原生的 " << fs << " 格式化器。本操作会把分区类型 GUID 设为 Apple "
+                              << fs << " 标准值并清空卷引导记录；文件系统结构需在 macOS 磁盘工具中完成抹掉（eraseVolume）。\n";
+                std::cout << "是否继续？(y/n): ";
+                char c;
+                std::cin >> c;
+                std::cin.ignore();
+                if (c != 'y' && c != 'Y') { std::cout << "操作已取消。\n"; Pause(); break; }
+
+                std::string scriptPath = WideToUtf8Text(ExpandPathVariables(L"%TEMP%\\stb_format_diskpart.txt"));
+                std::ofstream scriptFile(std::filesystem::u8path(scriptPath));
+                scriptFile << "select disk " << diskNum << "\n";
+                scriptFile << "select partition " << partNum << "\n";
+                if (appleFs)
+                    scriptFile << "set id=" << guid << "\n"; // Apple 分区类型 GUID（diskpart 原生不支持 fs=hfs+/apfs）
+                else
+                    scriptFile << "format fs=" << fs << " quick\n";
+                scriptFile << "exit\n";
+                scriptFile.close();
+                RunCmd("diskpart /s \"" + scriptPath + "\"");
+                DeleteFileA(scriptPath.c_str());
+                if (appleFs)
+                    std::cout << "分区类型已设为 " << fs << "。请到 macOS 磁盘工具对该分区执行抹掉以完成文件系统初始化。\n";
                 Pause();
                 break;
             }
