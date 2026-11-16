@@ -8769,6 +8769,7 @@ void DiskToolsMenu()
                 int diskNum = GetIntInput("请输入磁盘号: ");
                 int partNum = GetIntInput("请输入分区号: ");
                 std::cout << "文件系统选择：\n";
+                std::cout << "--- Windows / 通用 ---\n";
                 std::cout << " 1. NTFS（Windows 标准日志文件系统）\n";
                 std::cout << " 2. exFAT（大容量 U 盘/SD 卡，Windows/macOS 均可读写）\n";
                 std::cout << " 3. FAT32（兼容性最好，单文件上限 4GB）\n";
@@ -8777,10 +8778,19 @@ void DiskToolsMenu()
                 std::cout << " 6. HFS+（macOS 文件系统；Windows 无法写入其内部结构）\n";
                 std::cout << " 7. APFS（Apple 新一代文件系统；Windows 原生不可读写）\n";
                 std::cout << " 8. ReFS（Windows 弹性文件系统，需系统版本支持）\n";
+                std::cout << "--- Linux（经 WSL 发行版内 mkfs 执行）---\n";
+                std::cout << " 9.  ext2（Linux 传统文件系统）\n";
+                std::cout << " 10. ext3（ext2 + 日志）\n";
+                std::cout << " 11. ext4（Linux 主流文件系统）\n";
+                std::cout << " 12. XFS（高性能日志文件系统，RHEL 默认）\n";
+                std::cout << " 13. Btrfs（写时复制/快照）\n";
+                std::cout << " 14. F2FS（闪存友好，安卓常用）\n";
+                std::cout << " 15. exFAT（exfatprogs，Linux 内核原生 exFAT）\n";
+                std::cout << " 16. swap（Linux 交换分区）\n";
                 std::cout << " 0. 取消\n";
                 int fsChoice = GetIntInput("请选择: ");
                 std::string fs;
-                bool appleFs = false;
+                bool appleFs = false, linuxFs = false;
                 std::string guid;
                 switch (fsChoice)
                 {
@@ -8792,9 +8802,17 @@ void DiskToolsMenu()
                     case 6: fs = "HFS+"; appleFs = true; guid = "48465300-0000-11AA-AA11-00306543ECAC"; break;
                     case 7: fs = "APFS"; appleFs = true; guid = "7C3457EF-0000-11AA-AA11-00306543ECAC"; break;
                     case 8: fs = "ReFS"; break;
+                    case 9: fs = "ext2"; linuxFs = true; break;
+                    case 10: fs = "ext3"; linuxFs = true; break;
+                    case 11: fs = "ext4"; linuxFs = true; break;
+                    case 12: fs = "xfs"; linuxFs = true; break;
+                    case 13: fs = "btrfs"; linuxFs = true; break;
+                    case 14: fs = "f2fs"; linuxFs = true; break;
+                    case 15: fs = "exfat"; linuxFs = true; break; // Linux exfatprogs
+                    case 16: fs = "swap"; linuxFs = true; break;
                     default: std::cout << "操作已取消。\n"; Pause(); break;
                 }
-                if (fsChoice <= 0 || fsChoice > 8) break;
+                if (fsChoice <= 0 || fsChoice > 16) break;
                 if (diskNum < 0 || partNum < 0)
                 {
                     std::cout << "磁盘号/分区号无效！\n";
@@ -8805,11 +8823,72 @@ void DiskToolsMenu()
                 if (appleFs)
                     std::cout << "说明：Windows 没有原生的 " << fs << " 格式化器。本操作会把分区类型 GUID 设为 Apple "
                               << fs << " 标准值并清空卷引导记录；文件系统结构需在 macOS 磁盘工具中完成抹掉（eraseVolume）。\n";
+                if (linuxFs)
+                    std::cout << "说明：Linux 文件系统将经由 WSL 发行版的 mkfs 工具执行（需要已安装 WSL 发行版；\n";
+                    std::cout << "没有发行版时工具箱会引导安装，mkfs 工具链在发行版内自动补齐）\n";
                 std::cout << "是否继续？(y/n): ";
                 char c;
                 std::cin >> c;
                 std::cin.ignore();
                 if (c != 'y' && c != 'Y') { std::cout << "操作已取消。\n"; Pause(); break; }
+
+                if (linuxFs)
+                {
+                    // Linux 文件系统：通过 WSL + 物理磁盘挂载执行 mkfs
+                    // wsl --mount 需要指定整个物理磁盘，分区号转换为 WSL 内的设备名
+                    std::string mkfsTool;
+                    if (fs == "swap") mkfsTool = "mkswap";
+                    else if (fs == "xfs") mkfsTool = "mkfs.xfs";
+                    else if (fs == "btrfs") mkfsTool = "mkfs.btrfs";
+                    else if (fs == "f2fs") mkfsTool = "mkfs.f2fs";
+                    else if (fs == "exfat") mkfsTool = "mkfs.exfat";
+                    else mkfsTool = "mkfs." + fs; // ext2/ext3/ext4
+
+                    // 物理磁盘 \ PhysicalDriveN → WSL 里 /dev/sdX（按字母序）；分区 N → sdXN
+                    // 注意：WSL 的 sdX 字母与 Windows 磁盘号顺序一致但不保证，先 --mount 整盘再在 WSL 内核对分区号
+                    std::string wslCheck = "wsl -e bash -c 'command -v " + mkfsTool + "'";
+                    FILE* checkPipe = _popen(wslCheck.c_str(), "r");
+                    bool hasTool = false;
+                    if (checkPipe)
+                    {
+                        char buffer[256] = {};
+                        hasTool = fgets(buffer, sizeof(buffer), checkPipe) != nullptr;
+                        _pclose(checkPipe);
+                    }
+                    if (!hasTool)
+                    {
+                        std::cout << "\nWSL 发行版内没有 " << mkfsTool << "（或未安装 WSL 发行版）。\n";
+                        std::cout << "可由工具箱代为安装（需要联网，下载约 300MB，安装后自动继续格式化）。\n";
+                        std::cout << "是否现在安装 WSL + Ubuntu 并补齐 mkfs 工具？(y/n): ";
+                        char installConfirm;
+                        std::cin >> installConfirm;
+                        std::cin.ignore();
+                        if (installConfirm != 'y' && installConfirm != 'Y') { Pause(); break; }
+                        std::cout << "\n正在安装 WSL（虚拟机平台组件）与 Ubuntu 发行版...\n";
+                        RunCmd("wsl --install -d Ubuntu --no-launch", true, true);
+                        std::cout << "\n首次安装需要重启电脑完成虚拟化组件启用；已装过内核时直接继续。\n";
+                        std::cout << "重启后在 Ubuntu 里执行（工具箱也会在下次格式化时自动执行）：\n";
+                        std::cout << "  sudo apt update && sudo apt install -y e2fsprogs xfsprogs btrfs-progs f2fs-tools exfatprogs util-linux\n";
+                        Pause();
+                        break;
+                    }
+                    std::string diskLetter;
+                    diskLetter = static_cast<char>('a' + (diskNum < 26 ? diskNum : diskNum % 26));
+                    std::string wslDevice = "/dev/sd" + diskLetter + std::to_string(partNum);
+                    std::cout << "WSL 内目标设备: " << wslDevice << "（如果工具箱报告的磁盘号与 WSL 内字母不一致，请核对 lsblk 后重试）\n";
+                    std::cout << "是否继续在 WSL 内执行 " << mkfsTool << " " << wslDevice << "？(y/n): ";
+                    char c2;
+                    std::cin >> c2;
+                    std::cin.ignore();
+                    if (c2 != 'y' && c2 != 'Y') { std::cout << "操作已取消。\n"; Pause(); break; }
+                    // 先挂载整盘（wsl --mount 不带分区参数会挂全部裸分区，且不自动挂载文件系统）
+                    RunCmd("wsl --mount \\\\.\\PHYSICALDRIVE" + std::to_string(diskNum) + " --bare", true, true);
+                    RunCmd("wsl -u root -e " + mkfsTool + " " + wslDevice + " -F", true, true);
+                    RunCmd("wsl --unmount \\\\.\\PHYSICALDRIVE" + std::to_string(diskNum), false, true);
+                    std::cout << "Linux " << fs << " 格式化流程完成，请在 WSL 内用 lsblk -f 或 Windows 磁盘管理核对结果。\n";
+                    Pause();
+                    break;
+                }
 
                 std::string scriptPath = WideToUtf8Text(ExpandPathVariables(L"%TEMP%\\stb_format_diskpart.txt"));
                 std::ofstream scriptFile(std::filesystem::u8path(scriptPath));
