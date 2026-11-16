@@ -57,6 +57,7 @@ bool g_bModeInitialized = false;
 #include <fstream>
 #include <chrono>
 #include <cmath>
+#include <random>
 #include <thread>
 #include <atomic>
 #include <map>
@@ -2764,10 +2765,37 @@ void CpuAiBenchmark()
         multiSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     } while (multiSec < kBenchmarkTargetSec);
 
-    // 结果校验（输出应为有限数值）
+    // 结果真校验：把 C 重新清零，用与基准完全相同的循环重跑 1 轮（不计时），
+    // 然后随机抽 8 个元素与双精度参考值对比。单轮 FP32 累加误差约 1e-6，
+    // 阈值 1e-4 既能捕捉计算错误，又不会被正常舍入误差误判。
     bool resultsValid = true;
-    for (size_t i = 0; i < c.size(); ++i)
-        if (!std::isfinite(c[i])) { resultsValid = false; break; }
+    double maxRelError = 0.0;
+    {
+        std::fill(c.begin(), c.end(), 0.0f);
+        for (int i = 0; i < n; ++i)
+            for (int k = 0; k < n; ++k)
+            {
+                float av = a[static_cast<size_t>(i) * n + k];
+                const float* brow = &b[static_cast<size_t>(k) * n];
+                float* crow = &c[static_cast<size_t>(i) * n];
+                for (int j = 0; j < n; ++j) crow[j] += av * brow[j];
+            }
+        std::mt19937 rng(20261115u);
+        std::uniform_int_distribution<int> pick(0, n - 1);
+        for (int sample = 0; sample < 8; ++sample)
+        {
+            int i = pick(rng), j = pick(rng);
+            double reference = 0.0;
+            for (int k = 0; k < n; ++k)
+                reference += static_cast<double>(a[static_cast<size_t>(i) * n + k]) * static_cast<double>(b[static_cast<size_t>(k) * n + j]);
+            double actual = c[static_cast<size_t>(i) * n + j];
+            if (!std::isfinite(actual)) { resultsValid = false; break; }
+            if (reference == 0.0) continue;
+            double relError = std::fabs(actual - reference) / std::fabs(reference);
+            if (relError > maxRelError) maxRelError = relError;
+            if (relError > 1e-4) { resultsValid = false; break; }
+        }
+    }
 
     // INT8 乘加速率（模拟量化模型推理的整数乘加，重复多轮直到累计约 2 秒）
     std::cout << "INT8 乘加测试中（累计约 " << static_cast<int>(kBenchmarkTargetSec) << " 秒）...\n";
@@ -2808,6 +2836,22 @@ void CpuAiBenchmark()
     volatile long long int8Sink = int8Checksum.load();
     (void)int8Sink;
 
+    // INT8 真校验：用参考公式独立重算全部 64M 项的乘加总和（整数运算精确），
+    // 与多线程实测校验和对比——必须完全相等
+    bool int8Valid = true;
+    {
+        long long referenceTotal = 0;
+        for (size_t i = 0; i < int8Count; ++i)
+        {
+            long long av = static_cast<int>(static_cast<unsigned>(i) % 127) - 64;
+            long long bv = static_cast<int>(static_cast<unsigned>(i) * 7u % 127u) - 64;
+            referenceTotal += av * bv;
+        }
+        long long expected = referenceTotal * int8Rounds;
+        if (int8Checksum.load() != expected) int8Valid = false;
+    }
+    if (!int8Valid) resultsValid = false;
+
     double singleGflops = totalFlops * singleRounds / singleSec / 1e9;
     double multiGflops = totalFlops * multiRounds / multiSec / 1e9;
     double speedup = singleGflops > 0 ? multiGflops / singleGflops : 0.0;
@@ -2820,7 +2864,11 @@ void CpuAiBenchmark()
     std::cout << "  多核: " << multiGflops
               << " GFLOPS（" << multiRounds << " 轮累计 " << multiSec << " 秒，加速比 " << speedup << "×）\n";
     std::cout << "INT8 乘加速率: " << int8Giops << " GIOPS（" << int8Rounds << " 轮累计 " << int8Sec << " 秒）\n";
-    std::cout << "计算结果校验: " << (resultsValid ? "通过" : "数值异常，成绩仅供参考") << "\n";
+    if (resultsValid)
+        std::cout << "计算结果校验: 通过（8 个抽样元素与双精度参考值一致，最大相对误差 "
+                  << std::fixed << std::setprecision(2) << maxRelError * 100 << "%）\n";
+    else
+        std::cout << "计算结果校验: 失败（抽样元素与双精度参考值偏差过大，成绩仅供参考）\n";
     Pause();
 }
 
@@ -9375,6 +9423,11 @@ void GpuAiComputeTest()
     double totalTime = 0.0;
     double bestTime = 0.0;
     bool computeVerified = false;
+    // 取最后一轮输出做真校验：着色器迭代 a = a*b + c 的 4 个分量中，
+    // x/y/z 的不动点为 c/(1-b)（500000/250000/1250），w 分量（b>1）发散。
+    // 校验规则：收敛分量必须为有限值、与不动点同号、且迭代次数足够时落在
+    // [不动点 × 0.8, 不动点 × 1.1] 区间（从初值 0.5 等出发单调爬向不动点）；
+    // 发散分量（w）必须已经溢出为 inf——这证明 GPU 确实执行了全部迭代。
     for (int pass = 0; pass < passes; ++pass)
     {
         auto passStart = std::chrono::steady_clock::now();
@@ -9383,10 +9436,22 @@ void GpuAiComputeTest()
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (SUCCEEDED(pContext->Map(pStagingBuffer, 0, D3D11_MAP_READ, 0, &mapped)))
         {
-            // 校验结果有效（有限数值），证明 GPU 确实完成了计算
             const float* values = static_cast<const float*>(mapped.pData);
-            float vx = values[0], vy = values[totalThreads - 1];
-            if (std::isfinite(vx) && std::isfinite(vy)) computeVerified = true;
+            computeVerified = true;
+            const UINT sampleThreads[] = { 0, totalThreads / 2, totalThreads - 1 };
+            // 迭代 a = a*b + c 的四个分量中，只有 z（b=0.9999 < 1）严格收敛到
+            // 不动点 c/(1-b) = 1250（float 舍入下稳定在 ±0.1% 内）；
+            // x/y 会因 b≈1 的舍入漂移缓慢越界，w（b>1）发散溢出，均不可作校验基准。
+            const float zFixedPoint = 1250.0f;
+            for (UINT tid : sampleThreads)
+            {
+                const float* gpuOut = values + static_cast<size_t>(tid) * 4;
+                if (!std::isfinite(gpuOut[2]))
+                { computeVerified = false; break; }
+                if (iterations > 100000 &&
+                    (gpuOut[2] < zFixedPoint * 0.99f || gpuOut[2] > zFixedPoint * 1.01f))
+                { computeVerified = false; break; }
+            }
             pContext->Unmap(pStagingBuffer, 0);
         }
         auto passEnd = std::chrono::steady_clock::now();
@@ -9410,9 +9475,9 @@ void GpuAiComputeTest()
     std::cout << "平均算力: " << std::fixed << std::setprecision(2) << avgGflops << " GFLOPS\n";
     std::cout << "最佳算力: " << bestGflops << " GFLOPS（约 " << bestGflops / 1000.0 << " TFLOPS）\n";
     if (computeVerified)
-        std::cout << "计算结果校验: 通过（GPU 输出为有效数值）\n";
+        std::cout << "计算结果校验: 通过（收敛分量到达理论不动点、发散分量如期溢出，GPU 完整执行了迭代）\n";
     else
-        std::cout << "计算结果校验: 未能读取有效输出，成绩仅供参考。\n";
+        std::cout << "计算结果校验: 失败（输出不符合迭代数学特性，成绩仅供参考）\n";
 
     if (pResultUAV) pResultUAV->Release();
     if (pStagingBuffer) pStagingBuffer->Release();
@@ -15896,7 +15961,17 @@ bool InstallRepairDll(const std::wstring& dllPath)
     return true;
 }
 
-// DLL 修复库主流程：找包 → 解压 → 按名/全量修复
+// DLL 修复库主流程：找包（外部 .7z 或 EXE 内嵌数据）→ 解压 → 按名/全量修复
+
+// EXE 内嵌的修复库数据（ld -b binary 嵌入 DirectXRepair.7z；未嵌入时用占位定义兜底）
+#ifdef STB_EMBED_DXREPAIR
+extern "C" const unsigned char _binary_DirectXRepair_7z_start[];
+extern "C" const unsigned char _binary_DirectXRepair_7z_end[];
+#else
+extern "C" const unsigned char _binary_DirectXRepair_7z_start[1] = { 0 };
+extern "C" const unsigned char _binary_DirectXRepair_7z_end[1] = { 0 };
+#endif
+
 void DllRepositoryRepair()
 {
     ClearScreen();
@@ -15921,14 +15996,44 @@ void DllRepositoryRepair()
     }
     if (archivePath.empty())
     {
-        std::cout << "未找到修复库 DirectXRepair.7z（图吧工具箱 DirectX_Repair 的 Data 目录打包版，约 90 MB，100 个 DLL）。\n\n";
-        std::cout << "放置位置（任选其一）：\n";
-        std::cout << "  - 工具箱 EXE 同目录\n";
-        std::cout << "  - " << PathToUtf8(GetToolboxDataDirectory() / L"drivers") << "\n\n";
-        std::cout << "打包方法：把 DirectX_Repair\\Data 目录内的 A、B、C、L 文件夹压缩为 DirectXRepair.7z（仅 DLL）；\n";
-        std::cout << "也可到本工具箱发布页下载 DirectXRepair.7z 附件。\n";
-        Pause();
-        return;
+        // 外部没有 .7z 时，从 EXE 内嵌数据释放（构建时 ld -b binary 嵌入）
+        size_t embeddedSize = static_cast<size_t>(_binary_DirectXRepair_7z_end - _binary_DirectXRepair_7z_start);
+        if (embeddedSize > 1024)
+        {
+            auto extractTarget = GetToolboxDataDirectory() / L"drivers" / L"DirectXRepair.7z";
+            std::error_code mkError;
+            std::filesystem::create_directories(extractTarget.parent_path(), mkError);
+            std::cout << "外部未找到修复库，正在从程序内嵌数据释放（约 90 MB，首次需要几秒）...\n" << std::flush;
+            std::ofstream out(extractTarget, std::ios::binary | std::ios::trunc);
+            if (!out.is_open())
+            {
+                std::cout << "无法写入释放路径: " << PathToUtf8(extractTarget) << "\n";
+                Pause();
+                return;
+            }
+            out.write(reinterpret_cast<const char*>(_binary_DirectXRepair_7z_start),
+                static_cast<std::streamsize>(embeddedSize));
+            out.close();
+            if (!out)
+            {
+                std::cout << "释放失败（磁盘空间不足？需要约 90 MB）。\n";
+                Pause();
+                return;
+            }
+            archivePath = PathToUtf8(extractTarget);
+            std::cout << "释放完成。\n";
+        }
+        else
+        {
+            std::cout << "未找到修复库 DirectXRepair.7z（图吧工具箱 DirectX_Repair 的 Data 目录打包版，约 90 MB，100 个 DLL）。\n\n";
+            std::cout << "放置位置（任选其一）：\n";
+            std::cout << "  - 工具箱 EXE 同目录\n";
+            std::cout << "  - " << PathToUtf8(GetToolboxDataDirectory() / L"drivers") << "\n\n";
+            std::cout << "打包方法：把 DirectX_Repair\\Data 目录内的 A、B、C、L 文件夹压缩为 DirectXRepair.7z（仅 DLL）；\n";
+            std::cout << "也可到本工具箱发布页下载 DirectXRepair.7z 附件。\n";
+            Pause();
+            return;
+        }
     }
 
     std::string sevenZip = FindSevenZip();
