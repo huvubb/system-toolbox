@@ -9,7 +9,7 @@
 
 ### 网卡驱动救援包（驱动工具 → 24）
 
-- 内嵌通用网卡驱动合集（推荐）：构建时嵌入 Intel/Realtek/Qualcomm/MediaTek 四品牌官方驱动（NetDrivers.7z，28MB，覆盖 2728 个硬件 ID，含 Intel AX203/AX210/AX201 全系 1089 个、Realtek 8852BE、Qualcomm/Atheros 1611 个、MediaTek MT7920/7921），断网救急零下载零依赖本机。
+- 内嵌通用网卡驱动合集（推荐）：构建时嵌入 Intel/Realtek/Qualcomm/MediaTek 四品牌官方驱动（NetDrivers.7z，23MB，覆盖 2728 个硬件 ID：Intel Netwtw08 **24.80.0.2**——24.70 及以下对 AX203 支持不全，本版从已实测驱动 AX203 成功的本机 DriverStore 提取 Intel 官方签名版本；Realtek 8852BE、Qualcomm/Atheros 1611 个、MediaTek MT7920/7921），断网救急零下载零依赖本机。
 - 断网安装自动识别 Net 类 INF（兼容 UTF-16 编码 INF，Class= 任意空格对齐），实测 5 个 INF 识别 5 个、安装 5 成功 0 失败（already exists 正确计为成功）。
 - 硬件扫描修复：pnputil /scan-devices 被拒时回退 CM_Reenumerate_DevNode 全树重枚举，不再对 WAN Miniport 等系统设备报 Access denied。
 - 安装完成后自动检测网卡设备状态：已工作/有问题/硬件不在位三种结论分别提示（含 M.2 插槽与 BIOS 检查建议）。
