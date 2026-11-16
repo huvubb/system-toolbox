@@ -8845,30 +8845,37 @@ void DiskToolsMenu()
                     else mkfsTool = "mkfs." + fs; // ext2/ext3/ext4
 
                     // 物理磁盘 \ PhysicalDriveN → WSL 里 /dev/sdX（按字母序）；分区 N → sdXN
-                    // 注意：WSL 的 sdX 字母与 Windows 磁盘号顺序一致但不保证，先 --mount 整盘再在 WSL 内核对分区号
-                    std::string wslCheck = "wsl -e bash -c 'command -v " + mkfsTool + "'";
+                    // 注意：WSL 的 sdX 字母与 Windows 磁盘号顺序一致但不保证，先 --mount 整盘再在 WSL 内核对分区号。
+                    // 检测标记：wsl 在无发行版/无工具时也会打印错误但退出码为 0，因此必须校验输出内容
+                    std::string wslCheck = "wsl -e bash -c 'command -v " + mkfsTool + " >/dev/null 2>&1 && echo MKFS_TOOL_PRESENT'";
                     FILE* checkPipe = _popen(wslCheck.c_str(), "r");
                     bool hasTool = false;
                     if (checkPipe)
                     {
                         char buffer[256] = {};
-                        hasTool = fgets(buffer, sizeof(buffer), checkPipe) != nullptr;
+                        while (fgets(buffer, sizeof(buffer), checkPipe))
+                        {
+                            if (strstr(buffer, "MKFS_TOOL_PRESENT") != nullptr) { hasTool = true; break; }
+                        }
                         _pclose(checkPipe);
                     }
                     if (!hasTool)
                     {
                         std::cout << "\nWSL 发行版内没有 " << mkfsTool << "（或未安装 WSL 发行版）。\n";
-                        std::cout << "可由工具箱代为安装（需要联网，下载约 300MB，安装后自动继续格式化）。\n";
-                        std::cout << "是否现在安装 WSL + Ubuntu 并补齐 mkfs 工具？(y/n): ";
+                        std::cout << "注意：挂载物理盘格式化必须使用 WSL2（WSL1 不支持 wsl --mount）；\n";
+                        std::cout << "WSL2 需要 CPU 支持虚拟化，且首次启用可能要求重启。\n\n";
+                        std::cout << "是否由工具箱代为安装 WSL2 + Ubuntu（联网，Ubuntu 下载约 300MB）？(y/n): ";
                         char installConfirm;
                         std::cin >> installConfirm;
                         std::cin.ignore();
                         if (installConfirm != 'y' && installConfirm != 'Y') { Pause(); break; }
-                        std::cout << "\n正在安装 WSL（虚拟机平台组件）与 Ubuntu 发行版...\n";
+                        std::cout << "\n正在安装 WSL2 + Ubuntu（含虚拟机平台组件）...\n";
                         RunCmd("wsl --install -d Ubuntu --no-launch", true, true);
-                        std::cout << "\n首次安装需要重启电脑完成虚拟化组件启用；已装过内核时直接继续。\n";
-                        std::cout << "重启后在 Ubuntu 里执行（工具箱也会在下次格式化时自动执行）：\n";
-                        std::cout << "  sudo apt update && sudo apt install -y e2fsprogs xfsprogs btrfs-progs f2fs-tools exfatprogs util-linux\n";
+                        std::cout << "\n安装完成后：\n";
+                        std::cout << "  - 如提示需要重启，请重启电脑后再运行本功能（安装进度会保留）；\n";
+                        std::cout << "  - Ubuntu 首次启动会要求创建用户（任意用户名密码即可）；\n";
+                        std::cout << "  - 工具箱会在下次格式化时自动检查并提示补齐 mkfs 工具链：\n";
+                        std::cout << "    sudo apt update && sudo apt install -y e2fsprogs xfsprogs btrfs-progs f2fs-tools exfatprogs util-linux\n";
                         Pause();
                         break;
                     }
