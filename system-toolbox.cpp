@@ -10837,7 +10837,7 @@ void NetworkDriverRescueMenu()
             ClearScreen();
             std::cout << "========== 内嵌网卡驱动合集 ==========\n\n";
             std::cout << "本程序内置 4 个品牌驱动包（28MB，覆盖 2728 个硬件 ID）：\n";
-            std::cout << "  - Intel Wi-Fi：Netwtw08/Netwtw6e（AX200/AX201/AX203/AX210/AX211/9560/9260/8265 等，1089 个设备 ID）\n";
+            std::cout << "  - Intel Wi-Fi：Netwtw08 24.80.0.2（AX200/AX201/AX203/AX210/AX211 等现代卡；24.70 及以下对 AX203 支持不全）\n";
             std::cout << "  - Realtek：8852BE Wi-Fi 6（含 TP-Link 定制版，24 个设备 ID）\n";
             std::cout << "  - Qualcomm/Atheros：athw10x（AR9xxx/Killer 全系老网卡，1611 个设备 ID）\n";
             std::cout << "  - MediaTek：MT7920/MT7921 Wi-Fi 6E（4 个设备 ID）\n\n";
