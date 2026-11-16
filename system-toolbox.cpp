@@ -1470,6 +1470,124 @@ void CleanDiskC()
         std::cout << "     大小: " << FormatSize(size) << "\n";
     }
 
+    // AppData 深度清理项（只清理缓存类内容，绝不碰用户配置和数据）
+    char localAppDataBuf[MAX_PATH] = {};
+    GetEnvironmentVariableA("LOCALAPPDATA", localAppDataBuf, MAX_PATH);
+    std::string localAppData = localAppDataBuf;
+    char appDataBuf[MAX_PATH] = {};
+    GetEnvironmentVariableA("APPDATA", appDataBuf, MAX_PATH);
+    std::string roamingAppData = appDataBuf;
+
+    // 7. 各软件缓存目录（浏览器/工具缓存，不含配置）
+    std::cout << "\n [7] AppData 软件缓存（浏览器/工具缓存目录）\n";
+    {
+        unsigned long long total = 0;
+        const char* cachePaths[] = {
+            "\\Google\\Chrome\\User Data\\Default\\Cache",
+            "\\Google\\Chrome\\User Data\\Default\\Code Cache",
+            "\\Microsoft\\Edge\\User Data\\Default\\Cache",
+            "\\Microsoft\\Edge\\User Data\\Default\\Code Cache",
+            "\\Mozilla\\Firefox\\Profiles",
+            "\\Packages", // UWP 缓存按子目录处理，只统计
+        };
+        for (const char* sub : cachePaths)
+        {
+            std::string p = localAppData + sub;
+            DWORD attr = GetFileAttributesA(p.c_str());
+            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
+                total += GetFolderSize(p);
+        }
+        std::string p2 = roamingAppData + "\\Mozilla\\Firefox\\Profiles";
+        DWORD attr2 = GetFileAttributesA(p2.c_str());
+        if (attr2 != INVALID_FILE_ATTRIBUTES && (attr2 & FILE_ATTRIBUTE_DIRECTORY))
+            total += GetFolderSize(p2);
+        std::cout << "     合计: " << FormatSize(total) << "（仅缓存文件，登录状态与配置不受影响）\n";
+    }
+
+    // 8. 崩溃转储（Dump）
+    std::cout << "\n [8] 应用崩溃转储 (CrashDumps/WER)\n";
+    {
+        unsigned long long total = 0;
+        const char* dumpPaths[] = {
+            "\\CrashDumps",
+            "\\Microsoft\\Windows\\WER\\ReportArchive",
+            "\\Microsoft\\Windows\\WER\\ReportQueue",
+            "\\Temp", // 属于用户临时但常被忽略的大文件
+        };
+        for (const char* sub : dumpPaths)
+        {
+            std::string p = localAppData + sub;
+            DWORD attr = GetFileAttributesA(p.c_str());
+            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
+                total += GetFolderSize(p);
+        }
+        std::cout << "     合计: " << FormatSize(total) << "\n";
+    }
+
+    // 9. Windows 更新下载缓存
+    std::cout << "\n [9] Windows 更新下载缓存\n";
+    std::cout << "     路径: C:\\Windows\\SoftwareDistribution\\Download\n";
+    {
+        unsigned long long size = GetFolderSize("C:\\Windows\\SoftwareDistribution\\Download");
+        std::cout << "     大小: " << FormatSize(size) << "\n";
+    }
+
+    // 10. 传递优化缓存
+    std::cout << "\n [10] 传递优化缓存 (Delivery Optimization)\n";
+    std::cout << "     路径: C:\\Windows\\ServiceProfiles\\NetworkService\\AppData\\Local\\Microsoft\\Windows\\DeliveryOptimization\n";
+    {
+        unsigned long long size = GetFolderSize("C:\\Windows\\ServiceProfiles\\NetworkService\\AppData\\Local\\Microsoft\\Windows\\DeliveryOptimization");
+        std::cout << "     大小: " << FormatSize(size) << "\n";
+    }
+
+    // 11. 系统日志与诊断（CBS/DISM 日志、DirectX 缓存着色器）
+    std::cout << "\n [11] 系统日志与着色器缓存\n";
+    {
+        unsigned long long total = 0;
+        const char* logPaths[] = {
+            "C:\\Windows\\Logs\\CBS",
+            "C:\\Windows\\Logs\\DISM",
+            localAppData == "" ? "" : (localAppData + "\\D3DSCache").c_str(),
+            localAppData == "" ? "" : (localAppData + "\\NVIDIA\\DXCache").c_str(),
+            localAppData == "" ? "" : (localAppData + "\\AMD\\DxCache").c_str(),
+        };
+        for (const char* p : logPaths)
+        {
+            if (!*p) continue;
+            DWORD attr = GetFileAttributesA(p);
+            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
+                total += GetFolderSize(p);
+        }
+        std::cout << "     合计: " << FormatSize(total) << "（CBS/DISM 日志 + 显卡着色器缓存）\n";
+    }
+
+    // 12. npm/pip/gradle 等开发工具缓存
+    std::cout << "\n [12] 开发工具缓存（npm/pip/Hugging Face 等）\n";
+    {
+        unsigned long long total = 0;
+        const char* devPaths[] = {
+            "\\npm-cache",
+            "\\pip\\cache",
+            "\\huggingface",
+            "\\torch",
+            "\\Yarn\\Cache",
+            "\\pnpm\\store",
+            "\\NuGet\\v3-cache",
+        };
+        for (const char* sub : devPaths)
+        {
+            std::string p = localAppData + sub;
+            DWORD attr = GetFileAttributesA(p.c_str());
+            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
+                total += GetFolderSize(p);
+        }
+        std::string pipRoaming = roamingAppData + "\\pip\\cache";
+        DWORD attrPip = GetFileAttributesA(pipRoaming.c_str());
+        if (attrPip != INVALID_FILE_ATTRIBUTES && (attrPip & FILE_ATTRIBUTE_DIRECTORY))
+            total += GetFolderSize(pipRoaming);
+        std::cout << "     合计: " << FormatSize(total) << "（清理后下次构建会重新下载依赖）\n";
+    }
+
     std::cout << "\n========================================\n";
     std::cout << "分析完成！\n";
     std::cout << "========================================\n\n";
@@ -1482,10 +1600,17 @@ void CleanDiskC()
     std::cout << "  4. 缩略图缓存\n";
     std::cout << "  5. 预读取文件\n";
     std::cout << "  6. Windows 错误报告\n";
-    std::cout << "  7. 全部清理\n";
+    std::cout << "  7. AppData 软件缓存（浏览器等，不动配置）\n";
+    std::cout << "  8. 应用崩溃转储\n";
+    std::cout << "  9. Windows 更新下载缓存\n";
+    std::cout << " 10. 传递优化缓存\n";
+    std::cout << " 11. 系统日志与着色器缓存\n";
+    std::cout << " 12. 开发工具缓存（npm/pip 等）\n";
+    std::cout << "  7,8,9,10,11,12 可一次全选 AppData 深度清理\n";
+    std::cout << "  all = 全部清理\n";
     std::cout << "  0. 取消操作\n";
     std::cout << "----------------------------------------\n";
-    std::cout << "多选请用逗号分隔，例如：1,2,3\n";
+    std::cout << "多选请用逗号分隔，例如：1,2,3,7,8\n";
     std::cout << "========================================\n";
 
     std::string selection = GetInput("请输入选择: ");
@@ -1496,45 +1621,121 @@ void CleanDiskC()
         Pause();
         return;
     }
+    bool cleanAll = (selection == "all" || selection == "ALL" || selection == "7");
+    auto selected = [&](char item) -> bool {
+        return cleanAll || selection.find(item) != std::string::npos;
+    };
+    // AppData 深度清理组合项（7,8,9,10,11,12 一起给）
+    bool appDataDeep = false;
+    {
+        // 检查 7-12 全部被选择
+        bool allDeep = true;
+        for (char item = '7'; item <= '9'; ++item)
+            if (selection.find(item) == std::string::npos) { allDeep = false; break; }
+        if (allDeep && selection.find("10") != std::string::npos
+            && selection.find("11") != std::string::npos
+            && selection.find("12") != std::string::npos)
+            appDataDeep = true;
+    }
 
     std::cout << "\n========================================\n";
     std::cout << "           开始清理...\n";
     std::cout << "========================================\n";
 
-    if (selection == "7" || selection.find('1') != std::string::npos)
+    if (selected('1'))
     {
         std::cout << "\n[清理] 用户临时文件夹...\n";
         RunCmd("del /q /f /s \"%TEMP%\\*\"", false);
     }
 
-    if (selection == "7" || selection.find('2') != std::string::npos)
+    if (selected('2'))
     {
         std::cout << "\n[清理] Windows 临时文件夹...\n";
         RunCmd("del /q /f /s \"C:\\Windows\\Temp\\*\"", false);
     }
 
-    if (selection == "7" || selection.find('3') != std::string::npos)
+    if (selected('3'))
     {
         std::cout << "\n[清理] 回收站...\n";
         RunCmd("powershell -Command \"Clear-RecycleBin -Force -ErrorAction Stop\"", false);
     }
 
-    if (selection == "7" || selection.find('4') != std::string::npos)
+    if (selected('4'))
     {
         std::cout << "\n[清理] 缩略图缓存...\n";
         RunCmd("del /q /f /s \"%LOCALAPPDATA%\\Microsoft\\Windows\\Explorer\\thumbcache_*.db\"", false);
     }
 
-    if (selection == "7" || selection.find('5') != std::string::npos)
+    if (selected('5'))
     {
         std::cout << "\n[清理] 预读取文件...\n";
         RunCmd("del /q /f /s \"C:\\Windows\\Prefetch\\*\"", false);
     }
 
-    if (selection == "7" || selection.find('6') != std::string::npos)
+    if (selected('6'))
     {
         std::cout << "\n[清理] Windows 错误报告...\n";
         RunCmd("del /q /f /s \"C:\\ProgramData\\Microsoft\\Windows\\WER\\*\"", false);
+    }
+
+    // AppData 深度清理项
+    if (selected('7'))
+    {
+        std::cout << "\n[清理] AppData 软件缓存（浏览器 Cache/Code Cache/Firefox 缓存）...\n";
+        // 只删缓存目录内容，不动 User Data 配置
+        RunCmd("powershell -NoProfile -Command \""
+            "$targets = @("
+            "'$env:LOCALAPPDATA\\Google\\Chrome\\User Data\\Default\\Cache',"
+            "'$env:LOCALAPPDATA\\Google\\Chrome\\User Data\\Default\\Code Cache',"
+            "'$env:LOCALAPPDATA\\Microsoft\\Edge\\User Data\\Default\\Cache',"
+            "'$env:LOCALAPPDATA\\Microsoft\\Edge\\User Data\\Default\\Code Cache');"
+            "foreach ($t in $targets) { if (Test-Path $t) { Get-ChildItem $t -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue; Write-Host ('已清理: ' + $t) } }\"", false);
+    }
+
+    if (selected('8'))
+    {
+        std::cout << "\n[清理] 应用崩溃转储与 WER 报告...\n";
+        RunCmd("del /q /f /s \"%LOCALAPPDATA%\\CrashDumps\\*\"", false);
+        RunCmd("del /q /f /s \"%LOCALAPPDATA%\\Microsoft\\Windows\\WER\\ReportArchive\\*\"", false);
+        RunCmd("del /q /f /s \"%LOCALAPPDATA%\\Microsoft\\Windows\\WER\\ReportQueue\\*\"", false);
+    }
+
+    if (selected('9'))
+    {
+        std::cout << "\n[清理] Windows 更新下载缓存...\n";
+        // 先停 wuauserv 再删缓存，避免文件占用
+        RunCmd("net stop wuauserv >nul 2>&1", false);
+        RunCmd("del /q /f /s \"C:\\Windows\\SoftwareDistribution\\Download\\*\"", false);
+        RunCmd("net start wuauserv >nul 2>&1", false);
+    }
+
+    if (selected('a') || (appDataDeep && selection.find("10") != std::string::npos) || selection.find("10") != std::string::npos)
+    {
+        std::cout << "\n[清理] 传递优化缓存...\n";
+        RunCmd("powershell -NoProfile -Command \"Get-DeliveryOptimizationStatus | Out-Null; Delete-DeliveryOptimizationCache -Force -ErrorAction SilentlyContinue\"", false);
+        RunCmd("del /q /f /s \"C:\\Windows\\ServiceProfiles\\NetworkService\\AppData\\Local\\Microsoft\\Windows\\DeliveryOptimization\\*\"", false);
+    }
+
+    if (selection.find("11") != std::string::npos || cleanAll)
+    {
+        std::cout << "\n[清理] 系统日志与着色器缓存...\n";
+        RunCmd("del /q /f /s \"C:\\Windows\\Logs\\CBS\\*.log\"", false);
+        RunCmd("del /q /f /s \"C:\\Windows\\Logs\\DISM\\*.log\"", false);
+        RunCmd("del /q /f /s \"%LOCALAPPDATA%\\D3DSCache\\*\"", false);
+        RunCmd("del /q /f /s \"%LOCALAPPDATA%\\NVIDIA\\DXCache\\*\"", false);
+        RunCmd("del /q /f /s \"%LOCALAPPDATA%\\AMD\\DxCache\\*\"", false);
+    }
+
+    if (selection.find("12") != std::string::npos || cleanAll)
+    {
+        std::cout << "\n[清理] 开发工具缓存...\n";
+        RunCmd("npm cache clean --force >nul 2>&1", false);
+        RunCmd("del /q /f /s \"%LOCALAPPDATA%\\npm-cache\\*\"", false);
+        RunCmd("del /q /f /s \"%LOCALAPPDATA%\\pip\\cache\\*\"", false);
+        RunCmd("del /q /f /s \"%APPDATA%\\pip\\cache\\*\"", false);
+        RunCmd("del /q /f /s \"%LOCALAPPDATA%\\huggingface\\*\"", false);
+        RunCmd("del /q /f /s \"%LOCALAPPDATA%\\NuGet\\v3-cache\\*\"", false);
+        RunCmd("del /q /f /s \"%LOCALAPPDATA%\\Yarn\\Cache\\*\"", false);
     }
 
     std::cout << "\n========================================\n";
@@ -10961,11 +11162,16 @@ void NetworkDriverRescueMenu()
         {
             ClearScreen();
             std::cout << "========== 内嵌网卡驱动合集 ==========\n\n";
-            std::cout << "本程序内置 4 个品牌驱动包（28MB，覆盖 2728 个硬件 ID）：\n";
-            std::cout << "  - Intel Wi-Fi：Netwtw08 24.80.0.2（AX200/AX201/AX203/AX210/AX211 等现代卡；24.70 及以下对 AX203 支持不全）\n";
-            std::cout << "  - Realtek：8852BE Wi-Fi 6（含 TP-Link 定制版，24 个设备 ID）\n";
-            std::cout << "  - Qualcomm/Atheros：athw10x（AR9xxx/Killer 全系老网卡，1611 个设备 ID）\n";
-            std::cout << "  - MediaTek：MT7920/MT7921 Wi-Fi 6E（4 个设备 ID）\n\n";
+            std::cout << "本程序内置 9 个品牌驱动包（25MB，覆盖主流有线/无线/USB 网卡）：\n";
+            std::cout << "  - Intel Wi-Fi：Netwtw08 24.80.0.2（AX200/AX201/AX203/AX210/AX211 等；24.70 及以下对 AX203 支持不全）\n";
+            std::cout << "  - Realtek 有线：rtux86w10（RTL810x/811x/8125 全系 PCIe）\n";
+            std::cout << "  - Realtek Wi-Fi：netrtwlanu（RTL8812/8821/8852 全系 USB+PCIe）\n";
+            std::cout << "  - Realtek USB：rtu53cx22x64sta（RTL8153 USB 千兆）\n";
+            std::cout << "  - Broadcom 有线：b57nd60a（NetXtreme 全系）\n";
+            std::cout << "  - ASIX USB：AX88179/178A/772D（USB 千兆/百兆）\n";
+            std::cout << "  - Qualcomm/Atheros：athw10x（AR9xxx/Killer 全系老网卡）\n";
+            std::cout << "  - MediaTek：MT7920/MT7921 Wi-Fi 6E\n";
+            std::cout << "  - Intel 有线：通用千兆驱动\n";
             std::cout << "选择 2 号即可直接断网安装（自动从内嵌数据释放），无需联网和手动下载。\n";
             Pause();
         }
@@ -16258,8 +16464,8 @@ try {
         if ($selectedSize -gt 0 -and [uint64]$volume.SizeRemaining -lt $selectedSize) {
             throw '格式化后的可用空间小于映像体积，无法继续。'
         }
-        Write-Host "正在把 Windows 映像应用到 $target ，可能需要数分钟到半小时以上（取决于磁盘速度），请勿中断..."
-        $dism = Join-Path $env:SystemRoot 'System32\dism.exe'
+        Write-Host "正在把 Windows 映像应用到 $target ，可能需要数分钟到半小时以上（取决于磁盘速度），请勿中断...
+";
         if (Test-Path -LiteralPath $dism) {
             & $dism '/Apply-Image' "/ImageFile:$installPath" "/Index:$imageIndex" "/ApplyDir:$target" '/NoRestart'
             if ($LASTEXITCODE -ne 0) { throw "应用 Windows 映像失败，DISM 退出码 $LASTEXITCODE" }

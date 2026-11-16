@@ -1,5 +1,23 @@
 # 更新日志
 
+## npm 1.17.0 — 2026-11-16
+
+### 网卡驱动救援包扩到 9 品牌
+
+- 新增：Realtek 有线（RTL810x/811x/8125 全系）、Realtek Wi-Fi（RTL8812/8821/8852 USB+PCIe 全系）、Realtek USB（RTL8153）、Broadcom NetXtreme 有线全系、ASIX USB（AX88179/178A/772D）。
+- 内嵌包 25MB，覆盖 Intel/Realtek（有线+WiFi+USB）/Broadcom/ASIX/Qualcomm/MediaTek 全部主流有线、无线与 USB 网卡。
+
+### C 盘清理 AppData 深度清理（新增 6 项）
+
+- AppData 软件缓存（Chrome/Edge Cache、Firefox Profiles 缓存；只删缓存不动配置）。
+- 应用崩溃转储（CrashDumps/WER ReportArchive/ReportQueue，实测 873MB）。
+- Windows 更新下载缓存（SoftwareDistribution\Download，自动停启 wuauserv）。
+- 传递优化缓存（Delivery Optimization，实测 5.19GB）。
+- 系统日志与着色器缓存（CBS/DISM 日志、D3DSCache、NVIDIA/AMD DXCache）。
+- 开发工具缓存（npm/pip/Hugging Face/NuGet/Yarn/pnpm）。
+- 清理选择支持 all 全选与多选逗号组合。
+- npm 版本 1.17.0。
+
 ## npm 1.16.1 — 2026-11-16
 
 ### Linux 格式化无 WSL 修复
