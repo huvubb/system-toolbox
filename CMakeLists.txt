@@ -45,7 +45,7 @@ endif()
 
 foreach(target IN LISTS toolbox_targets)
     target_link_libraries(${target} PRIVATE Threads::Threads ws2_32 shell32 advapi32
-        ole32 crypt32 opengl32 d3d11 dxgi gdi32 user32 wbemuuid oleaut32 setupapi)
+        ole32 crypt32 opengl32 d3d11 d3d12 dxgi gdi32 user32 wbemuuid oleaut32 setupapi iphlpapi)
     if(MSVC)
         target_compile_options(${target} PRIVATE /utf-8 /W3)
     else()
