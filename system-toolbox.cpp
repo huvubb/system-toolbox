@@ -3499,6 +3499,7 @@ struct Ring0Driver
     std::string sysPath;
     std::string hash;
     DWORD loadError = 0;
+    DWORD deviceOpenError = 0; // 设备节点 CreateFile 的最后一次错误码
 };
 
 Ring0Driver& GetRing0Driver() { static Ring0Driver driver; return driver; }
@@ -3587,9 +3588,12 @@ bool Ring0Load()
     {
         driver.device = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
         if (driver.device != INVALID_HANDLE_VALUE) return true;
+        driver.deviceOpenError = GetLastError();
     }
+    // 全部设备名打不开：服务已启动但驱动没创建设备节点 → 大概率驱动镜像在加载阶段
+    // 被安全软件/HVCI 拦截（Event Log 会记录）。记录最后一次 CreateFile 的错误码供诊断。
     driver.loaded = false;
-    driver.loadError = GetLastError();
+    driver.loadError = 0; // 0 表示"服务已启动但设备节点打不开"的专用场景
     return false;
 }
 
@@ -4258,7 +4262,24 @@ void DiskSlotInfo()
                   << (cdrom.letter.empty() ? "" : "（" + cdrom.letter + "）") << "  " << cdrom.bus << "\n";
 
     std::cout << "\n主板插槽（SMBIOS 报告，占用 / 总数）:\n";
-    std::cout << "  NGFF/M.2 插槽: " << ngffUsed << " / " << ngffTotal << "\n";
+    // NVMe 插槽实况：M.2 插槽物理占用以实际接入的 NVMe 盘为准（SMBIOS 常常不报告 M.2 占用）
+    if (!nvmeDisks.empty())
+    {
+        std::cout << "  NVMe/M.2 实际占用: " << nvmeDisks.size() << " 块 NVMe 盘已接入";
+        // SMBIOS 报告了 M.2 插槽时给出对照
+        if (ngffTotal > 0)
+        {
+            std::cout << "（SMBIOS 报告 M.2 插槽 " << ngffTotal << " 个）";
+            if (ngffUsed == 0 && nvmeDisks.size() > 0)
+                std::cout << "——SMBIOS 未标记占用，以实际接入为准";
+        }
+        std::cout << "\n";
+        for (const auto& disk : nvmeDisks)
+            std::cout << "    " << disk.model << "  " << disk.bytes / (1024ull * 1024 * 1024) << " GB\n";
+    }
+    else if (ngffTotal > 0)
+        std::cout << "  NVMe/M.2 实际占用: 0 块 NVMe 盘已接入（SMBIOS 报告 M.2 插槽 " << ngffTotal << " 个）\n";
+    std::cout << "  NGFF/M.2 插槽（SMBIOS）: " << ngffUsed << " / " << ngffTotal << "\n";
     std::cout << "  mSATA 插槽: " << msataUsed << " / " << msataTotal << "\n";
     std::cout << "  SATA 插槽: " << sataSlotUsed << " / " << sataSlotTotal << "\n";
     std::cout << "  IDE 插槽: " << ideSlotUsed << " / " << ideSlotTotal << "\n";
@@ -4654,9 +4675,23 @@ void CpuEcFanMonitor()
     }
     if (!Ring0Load())
     {
-        std::cout << "驱动加载失败（文件: " << driverPath << "，错误码 " << GetRing0Driver().loadError << "）。\n";
-        std::cout << "常见原因：缺少管理员权限、被杀软拦截、系统开启内存完整性（HVCI）、服务处于待删除状态（稍候重试）。\n";
+        DWORD err = GetRing0Driver().loadError;
+        std::cout << "驱动加载失败（文件: " << driverPath << "，错误码 " << err << "）。\n";
+        switch (err)
+        {
+            case 0: std::cout << "错误码 0：服务已启动但设备节点打不开（CreateFile 错误 "
+                              << GetRing0Driver().deviceOpenError << "）——通常驱动镜像在加载时被安全软件拦截。\n"
+                              << "请检查杀软拦截记录与 Windows 事件查看器 → 系统日志；也可尝试关闭内存完整性（HVCI）。\n"; break;
+            case 2: std::cout << "错误码 2：驱动文件路径无法访问，请检查文件是否被删。\n"; break;
+            case 5: std::cout << "错误码 5：权限不足，请以管理员身份运行。\n"; break;
+            case 1058: std::cout << "错误码 1058：服务被禁用（杀软/系统动作），且自动恢复失败。\n"; break;
+            case 1072: std::cout << "错误码 1072：服务处于待删除状态，请稍等片刻后重试。\n"; break;
+            case 1073: std::cout << "错误码 1073：服务标记冲突，稍候重试。\n"; break;
+            case 1275: std::cout << "错误码 1275：驱动被 HVCI（内存完整性）或微软易受攻击驱动名单拦截，无法加载。\n"; break;
+            default: std::cout << "常见原因：被杀软拦截、系统开启内存完整性（HVCI）、服务处于待删除状态。\n"; break;
+        }
         std::cout << "驱动 SHA256: " << GetRing0Driver().hash << "\n";
+        std::cout << "排查建议：关闭杀软实时保护/内存完整性后重试；或查看 Windows 事件查看器 → 系统日志中 WinRing0x64 来源的错误。\n";
         Pause();
         return;
     }
