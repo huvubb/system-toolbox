@@ -1,5 +1,13 @@
 # 更新日志
 
+## npm 1.17.1 — 2026-11-21
+
+### DiskTool DLC 下载源调整
+
+- DiskTool DLC 下载改为仅从 GitHub Release 获取（github.com/huvubb/disktool），移除个人镜像站点备用源。
+- QQ 音乐转码器安装包下载源保持不变（主镜像 + web.archive.org 备源）。
+- npm 版本 1.17.1。
+
 ## npm 1.17.0 — 2026-11-16
 
 ### 网卡驱动救援包扩到 9 品牌
